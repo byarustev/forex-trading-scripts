@@ -1,0 +1,407 @@
+// This Pine Script™ indicator is based on the Athena Inv V1 strategy
+// (Refined Trading Strategy with FVG Inversion Entry Criteria).
+// Entry is STRICT: (1) Bias from 4H BoS → (2) Price must revisit a POI on 1H (main 4H zone OR
+// continuation POI: OB / FVG left behind after the move) → (3) Then a 1H FVG inversion → (4) One entry per setup until next BoS.
+
+//@version=5
+indicator("Athena Inv V1 — Structure, POI, FVG & Entry", shorttitle="Athena Inv V1", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+grp_struct = "Structure (4H)"
+tf_struct   = input.timeframe("240", "Structure timeframe", group=grp_struct, tooltip="Timeframe for swing points and BoS (e.g. 240 = 4H)")
+swing_len   = input.int(5, "Swing length (left/right bars)", minval=2, maxval=20, group=grp_struct)
+show_swings = input.bool(true, "Show swing highs/lows", group=grp_struct)
+show_bos    = input.bool(true, "Show Break of Structure", group=grp_struct)
+show_poi    = input.bool(true, "Show POI zones (fresh supply/demand)", group=grp_struct)
+poi_atr_mult = input.float(0.5, "POI zone width (× ATR)", minval=0.1, step=0.1, group=grp_struct)
+
+grp_fvg = "FVG (1H)"
+tf_fvg   = input.timeframe("60", "FVG timeframe", group=grp_fvg, tooltip="Timeframe for Fair Value Gaps (e.g. 60 = 1H)")
+show_fvg = input.bool(true, "Show FVG boxes", group=grp_fvg)
+show_inv = input.bool(true, "Show FVG inversion & entry", group=grp_fvg)
+
+grp_cont = "Continuation POIs (OB + FVG)"
+use_continuation_poi = input.bool(true, "Use continuation POIs (OB & FVG left after move)", group=grp_cont, tooltip="After BoS, new zones (order block + FVG) become additional POIs when price retraces to fill them")
+show_cont_poi       = input.bool(true, "Show continuation POI zones", group=grp_cont)
+
+grp_risk = "Entry & Risk"
+show_entry_sl_tp = input.bool(true, "Show entry, SL, TP levels", group=grp_risk)
+use_premium_discount = input.bool(true, "Premium/Discount filter (sells in premium, buys in discount)", group=grp_risk, tooltip="Only take sells above 50% equilibrium, buys below 50%")
+extend_sl_tp_bars  = input.int(12, "Entry/SL/TP line length (bars)", minval=5, maxval=50, group=grp_risk, tooltip="Short segment from entry bar so lines don’t overlap")
+// SL: a few pips off recent 1H internal level (swing high for sells, swing low for buys)
+swing_len_1h   = input.int(3, "1H internal swing length (for SL)", minval=2, maxval=10, group=grp_risk)
+sl_buffer_atr  = input.float(0.15, "SL buffer (× 1H ATR beyond internal level)", minval=0.05, step=0.05, group=grp_risk)
+// TPs: 3–4 levels — TP1/2/3 at fixed R:R, TP4 at previous 4H swing level (max)
+tp_rr_1        = input.float(2.0, "TP1 R:R", minval=1.0, step=0.5, group=grp_risk)
+tp_rr_2        = input.float(3.0, "TP2 R:R", minval=1.0, step=0.5, group=grp_risk)
+tp_rr_3        = input.float(4.0, "TP3 R:R", minval=1.0, step=0.5, group=grp_risk)
+use_swing_tp4  = input.bool(true, "TP4 at previous 4H swing level (liquidity)", group=grp_risk)
+
+// ═══════════════════════════════════════════════════════════════
+// 4H STRUCTURE — Pivot highs/lows and BoS
+// ═══════════════════════════════════════════════════════════════
+[ph_4h, pl_4h] = request.security(syminfo.tickerid, tf_struct, [ta.pivothigh(high, swing_len, swing_len), ta.pivotlow(low, swing_len, swing_len)], lookahead=barmerge.lookahead_off)
+close_4h = request.security(syminfo.tickerid, tf_struct, close, lookahead=barmerge.lookahead_off)
+
+var float last_swing_high = na
+var float last_swing_low  = na
+var int   bias            = 0   // 1 = bullish, -1 = bearish
+var float poi_high        = na  // supply zone (bearish)
+var float poi_low         = na  // demand zone (bullish)
+var bool  poi_revisited   = false  // true only after price has traded into POI at least once after BoS
+var bool  entry_taken     = false  // one entry per setup; reset on new BoS
+var bool  bos_bull_done   = false
+var bool  bos_bear_done   = false
+
+if not na(ph_4h)
+    last_swing_high := ph_4h
+    bos_bull_done := false  // new high — allow next bullish BoS
+if not na(pl_4h)
+    last_swing_low := pl_4h
+    bos_bear_done := false  // new low — allow next bearish BoS
+
+// BoS: break above last swing high → bullish; break below last swing low → bearish
+bool has_swing_high = not na(last_swing_high)
+bool has_swing_low  = not na(last_swing_low)
+bool bos_bull       = has_swing_high and close_4h > last_swing_high and not bos_bull_done
+bool bos_bear       = has_swing_low  and close_4h < last_swing_low  and not bos_bear_done
+
+if bos_bull
+    bias := 1
+    poi_low := last_swing_low
+    poi_revisited := false
+    entry_taken := false
+    bos_bull_done := true
+    bos_bear_done := false
+if bos_bear
+    bias := -1
+    poi_high := last_swing_high
+    poi_revisited := false
+    entry_taken := false
+    bos_bear_done := true
+    bos_bull_done := false
+
+// Revisit POI: price has come back into the zone (for display / logic)
+float atr_4h = request.security(syminfo.tickerid, tf_struct, ta.atr(14), lookahead=barmerge.lookahead_off)
+float poi_high_lo = na
+float poi_high_hi = na
+float poi_low_lo  = na
+float poi_low_hi  = na
+if not na(poi_high)
+    poi_high_lo := poi_high - poi_atr_mult * atr_4h
+    poi_high_hi := poi_high + poi_atr_mult * atr_4h
+if not na(poi_low)
+    poi_low_lo := poi_low - poi_atr_mult * atr_4h
+    poi_low_hi := poi_low + poi_atr_mult * atr_4h
+
+// Premium/Discount: 50% equilibrium of range (last 4H swing high ↔ swing low). Sells only in premium (above 50%), buys only in discount (below 50%).
+float equilibrium = (not na(last_swing_high) and not na(last_swing_low)) ? (last_swing_high + last_swing_low) / 2.0 : na
+
+// Continuation POI vars (filled after FVG block below)
+var float ob_supply_hi  = na
+var float ob_supply_lo  = na
+var float ob_demand_hi  = na
+var float ob_demand_lo  = na
+var float cont_fvg_hi   = na
+var float cont_fvg_lo   = na
+
+// Revisit = main POI OR continuation POI (OB or FVG zone); confirmed when a 1H candle trades into the zone
+[h_1h, l_1h] = request.security(syminfo.tickerid, tf_fvg, [high, low], lookahead=barmerge.lookahead_off)
+bool in_supply_zone_1h = not na(poi_high_lo) and bias == -1 and h_1h >= poi_high_lo and l_1h <= poi_high_hi
+bool in_demand_zone_1h = not na(poi_low_lo)  and bias == 1  and l_1h <= poi_low_hi  and h_1h >= poi_low_lo
+bool in_ob_supply_1h   = use_continuation_poi and bias == -1 and not na(ob_supply_lo) and h_1h >= ob_supply_lo and l_1h <= ob_supply_hi
+bool in_ob_demand_1h   = use_continuation_poi and bias == 1  and not na(ob_demand_lo)  and l_1h <= ob_demand_hi  and h_1h >= ob_demand_lo
+bool in_cont_fvg_1h    = use_continuation_poi and not na(cont_fvg_lo) and h_1h >= cont_fvg_lo and l_1h <= cont_fvg_hi
+if in_supply_zone_1h or in_demand_zone_1h or in_ob_supply_1h or in_ob_demand_1h or in_cont_fvg_1h
+    poi_revisited := true
+
+// ═══════════════════════════════════════════════════════════════
+// 1H FVG — Fair Value Gaps and inversion (evaluated on FVG TF)
+// Bullish FVG: high[3] < low[1]. Bearish FVG: low[3] > high[1].
+// ═══════════════════════════════════════════════════════════════
+// Bar [3] = candle before the FVG impulse; its range = Order Block (OB) for continuation POI
+[bull_fvg_ok, bear_fvg_ok, fvg_bull_t, fvg_bull_b, fvg_bear_t, fvg_bear_b, close_fvg, h3, l3] = request.security(syminfo.tickerid, tf_fvg,
+  [high[3] < low[1], low[3] > high[1], low[1], high[3], low[3], high[1], close, high[3], low[3]],
+  lookahead=barmerge.lookahead_off)
+
+bool bullish_fvg = bull_fvg_ok
+bool bearish_fvg = bear_fvg_ok
+float fvg_bull_top = fvg_bull_t
+float fvg_bull_bot = fvg_bull_b
+float fvg_bear_top = fvg_bear_t
+float fvg_bear_bot = fvg_bear_b
+
+// Continuation POIs: OB (candle [3] before FVG) and FVG zone, stored when FVG forms in direction of bias
+if use_continuation_poi and bearish_fvg and bias == -1 and not na(h3) and not na(l3)
+    ob_supply_hi := h3
+    ob_supply_lo := l3
+    cont_fvg_hi  := fvg_bear_top
+    cont_fvg_lo  := fvg_bear_bot
+if use_continuation_poi and bullish_fvg and bias == 1 and not na(h3) and not na(l3)
+    ob_demand_hi := h3
+    ob_demand_lo := l3
+    cont_fvg_hi  := fvg_bull_top
+    cont_fvg_lo  := fvg_bull_bot
+
+// Inversion: bearish → bullish FVG inverts when 1H closes below FVG bottom; bullish → bearish FVG inverts when 1H closes above FVG top
+// Entry allowed ONLY after POI revisit and only one entry per setup (until next BoS)
+bool inv_bull_fvg_raw = bias == -1 and not na(fvg_bull_bot) and close_fvg < fvg_bull_bot
+bool inv_bear_fvg_raw = bias == 1  and not na(fvg_bear_top) and close_fvg > fvg_bear_top
+bool inv_bull_fvg = inv_bull_fvg_raw and poi_revisited and not entry_taken
+bool inv_bear_fvg = inv_bear_fvg_raw and poi_revisited and not entry_taken
+
+// 1H internal structure for SL (recent swing high for sells, swing low for buys)
+[ph_1h, pl_1h, atr_1h] = request.security(syminfo.tickerid, tf_fvg,
+  [ta.pivothigh(high, swing_len_1h, swing_len_1h), ta.pivotlow(low, swing_len_1h, swing_len_1h), ta.atr(14)],
+  lookahead=barmerge.lookahead_off)
+var float last_1h_swing_high = na
+var float last_1h_swing_low  = na
+if not na(ph_1h)
+    last_1h_swing_high := ph_1h
+if not na(pl_1h)
+    last_1h_swing_low := pl_1h
+
+// Track last valid FVG for entry/SL/TP (after inversion we use that FVG's mid as entry)
+var float entry_level = na
+var float sl_level    = na
+var float tp1_level   = na
+var float tp2_level   = na
+var float tp3_level   = na
+var float tp4_level   = na
+var int   entry_bar   = 0   // bar index when entry was taken (for drawing SL/TP lines)
+var line  entry_line  = na
+var line  sl_line     = na
+var line  tp1_line    = na
+var line  tp2_line    = na
+var line  tp3_line    = na
+var line  tp4_line    = na
+var float last_fvg_bull_top = na
+var float last_fvg_bull_bot = na
+var float last_fvg_bear_top = na
+var float last_fvg_bear_bot = na
+
+// Only track FVGs that form after any POI revisit (main or continuation OB/FVG)
+if bullish_fvg and bias == -1 and poi_revisited
+    last_fvg_bull_top := fvg_bull_top
+    last_fvg_bull_bot := fvg_bull_bot
+if bearish_fvg and bias == 1 and poi_revisited
+    last_fvg_bear_top := fvg_bear_top
+    last_fvg_bear_bot := fvg_bear_bot
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOT: Entry as pending order (for use when building the trading bot)
+// ─────────────────────────────────────────────────────────────────────────────
+// • Entry should be placed as a PENDING order a few pips from the middle of the iFVG
+//   (not market order at signal time).
+// • BUYS: Place the pending buy in the UPPER part of the iFVG (the smaller half).
+//   iFVG for buys = inverted bearish FVG: top = last_fvg_bear_top, bottom = last_fvg_bear_bot,
+//   middle = (last_fvg_bear_top + last_fvg_bear_bot) / 2. Upper part = from middle to top.
+// • SELLS: Place the pending sell in the LOWER part of the iFVG (the smaller half).
+//   iFVG for sells = inverted bullish FVG: top = last_fvg_bull_top, bottom = last_fvg_bull_bot,
+//   middle = (last_fvg_bull_top + last_fvg_bull_bot) / 2. Lower part = from middle to bottom.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Sell setup: SL = 1H internal swing high + buffer; TPs = 2R, 3R, 4R, and max = previous 4H swing low. Only in premium (entry ≥ 50%).
+float entry_sell = (last_fvg_bull_top + last_fvg_bull_bot) / 2
+bool sell_ok = inv_bull_fvg and not na(last_fvg_bull_top) and (not use_premium_discount or na(equilibrium) or entry_sell >= equilibrium)
+if sell_ok
+    entry_taken := true
+    entry_bar   := bar_index
+    entry_level := entry_sell
+    float sl_buf = not na(atr_1h) ? atr_1h * sl_buffer_atr : entry_level * 0.005
+    sl_level    := not na(last_1h_swing_high) ? last_1h_swing_high + sl_buf : (not na(poi_high) ? poi_high + poi_atr_mult * atr_4h : na)
+    float risk  = sl_level - entry_level
+    if not na(sl_level) and risk > 0
+        tp1_level := entry_level - tp_rr_1 * risk
+        tp2_level := entry_level - tp_rr_2 * risk
+        tp3_level := entry_level - tp_rr_3 * risk
+        tp4_level := use_swing_tp4 and not na(last_swing_low) and last_swing_low < entry_level ? last_swing_low : entry_level - tp_rr_3 * risk
+    else
+        tp1_level := na
+        tp2_level := na
+        tp3_level := na
+        tp4_level := na
+
+// Buy setup: SL = 1H internal swing low − buffer; TPs = 2R, 3R, 4R, and max = previous 4H swing high. Only in discount (entry ≤ 50%).
+float entry_buy = (last_fvg_bear_top + last_fvg_bear_bot) / 2
+bool buy_ok = inv_bear_fvg and not na(last_fvg_bear_top) and (not use_premium_discount or na(equilibrium) or entry_buy <= equilibrium)
+if buy_ok
+    entry_taken := true
+    entry_bar   := bar_index
+    entry_level := entry_buy
+    float sl_buf = not na(atr_1h) ? atr_1h * sl_buffer_atr : entry_level * 0.005
+    sl_level    := not na(last_1h_swing_low) ? last_1h_swing_low - sl_buf : (not na(poi_low) ? poi_low - poi_atr_mult * atr_4h : na)
+    float risk  = entry_level - sl_level
+    if not na(sl_level) and risk > 0
+        tp1_level := entry_level + tp_rr_1 * risk
+        tp2_level := entry_level + tp_rr_2 * risk
+        tp3_level := entry_level + tp_rr_3 * risk
+        tp4_level := use_swing_tp4 and not na(last_swing_high) and last_swing_high > entry_level ? last_swing_high : entry_level + tp_rr_3 * risk
+    else
+        tp1_level := na
+        tp2_level := na
+        tp3_level := na
+        tp4_level := na
+
+// Reset entry/SL/TP, stored FVG, and continuation POIs when bias flips (new BoS)
+if bos_bull or bos_bear
+    if not na(entry_line)
+        line.delete(entry_line)
+    if not na(sl_line)
+        line.delete(sl_line)
+    if not na(tp1_line)
+        line.delete(tp1_line)
+    if not na(tp2_line)
+        line.delete(tp2_line)
+    if not na(tp3_line)
+        line.delete(tp3_line)
+    if not na(tp4_line)
+        line.delete(tp4_line)
+    entry_line := na
+    sl_line    := na
+    tp1_line   := na
+    tp2_line   := na
+    tp3_line   := na
+    tp4_line   := na
+    entry_level := na
+    sl_level    := na
+    tp1_level   := na
+    tp2_level   := na
+    tp3_level   := na
+    tp4_level   := na
+    entry_taken := false
+    entry_bar   := 0
+    last_fvg_bull_top := na
+    last_fvg_bull_bot := na
+    last_fvg_bear_top := na
+    last_fvg_bear_bot := na
+    ob_supply_hi := na
+    ob_supply_lo := na
+    ob_demand_hi := na
+    ob_demand_lo := na
+    cont_fvg_hi  := na
+    cont_fvg_lo  := na
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS — Swing points
+// ═══════════════════════════════════════════════════════════════
+plot(show_swings and not na(ph_4h) ? ph_4h : na, "4H Swing High", color.new(color.red, 0), 2, plot.style_circles)
+plot(show_swings and not na(pl_4h) ? pl_4h : na, "4H Swing Low",  color.new(color.green, 0), 2, plot.style_circles)
+
+// BoS labels
+if show_bos and bos_bull
+    label.new(bar_index, low, "BoS Bull", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+if show_bos and bos_bear
+    label.new(bar_index, high, "BoS Bear", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// POI zones (boxes) — supply = red, demand = green
+var box supply_box = na
+var box demand_box = na
+if show_poi and bias == -1 and not na(poi_high_lo)
+    if na(supply_box)
+        supply_box := box.new(bar_index - 10, poi_high_hi, bar_index + 5, poi_high_lo, border_color=color.red, bgcolor=color.new(color.red, 85))
+    else
+        box.set_lefttop(supply_box, bar_index - 10, poi_high_hi)
+        box.set_rightbottom(supply_box, bar_index + 5, poi_high_lo)
+else
+    if not na(supply_box)
+        box.delete(supply_box)
+        supply_box := na
+
+if show_poi and bias == 1 and not na(poi_low_lo)
+    if na(demand_box)
+        demand_box := box.new(bar_index - 10, poi_low_hi, bar_index + 5, poi_low_lo, border_color=color.green, bgcolor=color.new(color.green, 85))
+    else
+        box.set_lefttop(demand_box, bar_index - 10, poi_low_hi)
+        box.set_rightbottom(demand_box, bar_index + 5, poi_low_lo)
+else
+    if not na(demand_box)
+        box.delete(demand_box)
+        demand_box := na
+
+// Continuation POI boxes (OB + FVG left behind after the move)
+var box ob_supply_box  = na
+var box ob_demand_box  = na
+var box cont_fvg_box   = na
+if show_cont_poi and use_continuation_poi and bias == -1 and not na(ob_supply_lo)
+    if na(ob_supply_box)
+        ob_supply_box := box.new(bar_index - 8, ob_supply_hi, bar_index + 4, ob_supply_lo, border_color=color.maroon, bgcolor=color.new(color.maroon, 88))
+    else
+        box.set_lefttop(ob_supply_box, bar_index - 8, ob_supply_hi)
+        box.set_rightbottom(ob_supply_box, bar_index + 4, ob_supply_lo)
+else
+    if not na(ob_supply_box)
+        box.delete(ob_supply_box)
+        ob_supply_box := na
+if show_cont_poi and use_continuation_poi and bias == 1 and not na(ob_demand_lo)
+    if na(ob_demand_box)
+        ob_demand_box := box.new(bar_index - 8, ob_demand_hi, bar_index + 4, ob_demand_lo, border_color=color.teal, bgcolor=color.new(color.teal, 88))
+    else
+        box.set_lefttop(ob_demand_box, bar_index - 8, ob_demand_hi)
+        box.set_rightbottom(ob_demand_box, bar_index + 4, ob_demand_lo)
+else
+    if not na(ob_demand_box)
+        box.delete(ob_demand_box)
+        ob_demand_box := na
+if show_cont_poi and use_continuation_poi and not na(cont_fvg_lo)
+    if na(cont_fvg_box)
+        cont_fvg_box := box.new(bar_index - 6, cont_fvg_hi, bar_index + 3, cont_fvg_lo, border_color=color.orange, bgcolor=color.new(color.orange, 90))
+    else
+        box.set_lefttop(cont_fvg_box, bar_index - 6, cont_fvg_hi)
+        box.set_rightbottom(cont_fvg_box, bar_index + 3, cont_fvg_lo)
+else
+    if not na(cont_fvg_box)
+        box.delete(cont_fvg_box)
+        cont_fvg_box := na
+
+// FVG boxes (1H) — draw on chart using 1H bar index approximation: we plot at current bar for simplicity
+var box fvg_bull_box = na
+var box fvg_bear_box = na
+if show_fvg and bullish_fvg
+    if not na(fvg_bull_box)
+        box.delete(fvg_bull_box)
+    fvg_bull_box := box.new(bar_index - 3, fvg_bull_top, bar_index + 2, fvg_bull_bot, border_color=color.teal, bgcolor=color.new(color.teal, 80))
+if show_fvg and bearish_fvg
+    if not na(fvg_bear_box)
+        box.delete(fvg_bear_box)
+    fvg_bear_box := box.new(bar_index - 3, fvg_bear_top, bar_index + 2, fvg_bear_bot, border_color=color.orange, bgcolor=color.new(color.orange, 80))
+
+// Entry / SL / TP: short horizontal segments from entry bar (fixed length so they don’t run into other entries)
+int end_bar = entry_bar + math.max(extend_sl_tp_bars, 1)
+if show_entry_sl_tp and entry_bar > 0 and not na(entry_level) and not na(sl_level)
+    if na(entry_line)
+        entry_line := line.new(entry_bar, entry_level, end_bar, entry_level, color=color.blue, width=2)
+        sl_line    := line.new(entry_bar, sl_level, end_bar, sl_level, color=color.red, width=2)
+        tp1_line   := not na(tp1_level) ? line.new(entry_bar, tp1_level, end_bar, tp1_level, color=color.green, width=1) : na
+        tp2_line   := not na(tp2_level) ? line.new(entry_bar, tp2_level, end_bar, tp2_level, color=color.green, width=1) : na
+        tp3_line   := not na(tp3_level) ? line.new(entry_bar, tp3_level, end_bar, tp3_level, color=color.green, width=1) : na
+        tp4_line   := not na(tp4_level) ? line.new(entry_bar, tp4_level, end_bar, tp4_level, color=color.lime, width=2) : na
+        label.new(end_bar, entry_level, " Entry ", style=label.style_label_left, color=color.blue, textcolor=color.white, size=size.small)
+        label.new(end_bar, sl_level, " SL ", style=label.style_label_left, color=color.red, textcolor=color.white, size=size.small)
+        if not na(tp1_level)
+            label.new(end_bar, tp1_level, " TP1 ", style=label.style_label_left, color=color.green, textcolor=color.white, size=size.small)
+        if not na(tp2_level)
+            label.new(end_bar, tp2_level, " TP2 ", style=label.style_label_left, color=color.green, textcolor=color.white, size=size.small)
+        if not na(tp3_level)
+            label.new(end_bar, tp3_level, " TP3 ", style=label.style_label_left, color=color.green, textcolor=color.white, size=size.small)
+        if not na(tp4_level)
+            label.new(end_bar, tp4_level, " TP4 ", style=label.style_label_left, color=color.lime, textcolor=color.white, size=size.small)
+plot(show_entry_sl_tp ? entry_level : na, "Entry", color.blue, 2)
+plot(show_entry_sl_tp ? sl_level : na, "Stop Loss", color.red, 2)
+plot(show_entry_sl_tp ? tp1_level : na, "TP1 (R:R)", color.green, 1)
+plot(show_entry_sl_tp ? tp2_level : na, "TP2 (R:R)", color.green, 1)
+plot(show_entry_sl_tp ? tp3_level : na, "TP3 (R:R)", color.green, 1)
+plot(show_entry_sl_tp ? tp4_level : na, "TP4 (swing / max)", color.lime, 2)
+
+// Inversion labels (only when entry is taken, i.e. passed premium/discount filter)
+if show_inv and sell_ok
+    label.new(bar_index, high, "iFVG Sell", style=label.style_label_down, color=color.purple, textcolor=color.white, size=size.small)
+if show_inv and buy_ok
+    label.new(bar_index, low, "iFVG Buy", style=label.style_label_up, color=color.purple, textcolor=color.white, size=size.small)
+
+// Alerts — fire when an entry is triggered
+alertcondition(sell_ok, "Athena Inv V1 — Sell Entry", "{{ticker}} SELL entry (iFVG) on {{interval}}")
+alertcondition(buy_ok, "Athena Inv V1 — Buy Entry", "{{ticker}} BUY entry (iFVG) on {{interval}}")
+alertcondition(sell_ok or buy_ok, "Athena Inv V1 — Any Entry", "{{ticker}} Entry signal on {{interval}}")

@@ -1,0 +1,67 @@
+Athena Inv V2.2 — Version Summary
+=================================
+
+Core purpose
+------------
+Multi-timeframe POI (Points of Interest) tracker and entry logic built on 4H structure, 1H FVGs, and continuation zones. Trades only with trend: BUY in bullish 4H, SELL in bearish 4H.
+
+1. 4H structure & trend
+-----------------------
+• Swing points: 4H pivots (configurable swing length).
+• Trend confirmed only when BOTH ChoCH and BoS occur:
+  - ChoCH = close beyond previous swing.
+  - BoS = close beyond last swing.
+• Bias: 1 = bullish, -1 = bearish. No counter-trend entries.
+
+2. Multi-POI tracking (v2.2)
+----------------------------
+• Supply/demand stored in arrays (not a single zone).
+• POI types:
+  - 4H: main swing zone, candle-before-impulse OB, 4H Breaker Block, optional 4H FVG.
+  - 1H: ChoCH OB, continuation OB/FVG, 1H Breaker Block.
+• Mitigation: tracks whether price has revisited each zone (unmitigated POIs highlighted).
+• Capped at max_pois per bias; FIFO when full.
+
+3. Breaker blocks
+-----------------
+• 4H Breaker = last opposite candle before ChoCH/BoS on 4H.
+• 1H Breaker = same on 1H. Stored as POIs and drawn with distinct style (e.g. blue/teal).
+
+4. 1H FVG & iFVG entry
+----------------------
+• FVG: 1H fair value gaps (body or full range), min size vs 1H ATR.
+• Historical FVGs: stores recent 1H FVGs as price heads to 4H POI (up to max_hist_fvg).
+• Inversion (iFVG): full 1H close through any stored gap:
+  - Bullish FVG inverts (close below gap) → buy setup; entry = mid of iFVG.
+  - Bearish FVG inverts (close above gap) → sell setup; entry = mid of iFVG.
+• Valid when: price has revisited a 4H POI, or (in continuation window) touched a 1H POI.
+
+5. Continuation POIs
+--------------------
+• After 4H structure change, new 1H OB/FVG zones from the move become POIs.
+• Continuation window: for N bars after trend confirm, entries allowed at 1H continuation POIs in trend direction.
+• Optional: 4H FVG as POI so revisits trigger 1H iFVG entry logic.
+
+6. Entry models
+---------------
+• 4H POI + 1H ChoCH: price at 4H POI and 1H ChoCH → limit at 1H OB (candle before rally).
+• 1H iFVG: HTF POI revisited + 1H FVG inverts → limit at mid of iFVG; multi-TP (TP1–TP4).
+• 1H POI + liquidity: unmitigated 1H POI below EQL (buys) or above EQH (sells) → limit at POI (inducement).
+
+7. Risk & display
+-----------------
+• SL: beyond recent 1H internal swing (e.g. swing high for sells) by ATR buffer.
+• TPs: TP1–TP3 at fixed R:R; TP4 at previous 4H swing (liquidity).
+• Premium/Discount: optional filter — sells above 50% equilibrium, buys below.
+• Drawing: swings, BoS labels, POI boxes (unmitigated/Breaker styling), FVG boxes, iFVG zone, entry/SL/TP lines, limit levels; lines limited in length and hidden after N bars.
+
+8. Alerts
+---------
+• 1H iFVG Sell / Buy.
+• Any 1H iFVG entry.
+• 4H POI + 1H ChoCH limit buy/sell.
+• 1H POI + liquidity buy/sell.
+
+In short
+--------
+This version unifies 4H structure, multi-POI tracking, Breaker Blocks, 4H FVG POIs, continuation logic, and three entry types (4H POI+ChoCH, 1H iFVG, 1H POI+liquidity) in one indicator with clear zones, entry levels, and alerts, while keeping trades aligned with 4H trend and optional premium/discount.
