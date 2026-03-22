@@ -1,0 +1,11 @@
+SMC Blueprint Signals — stable release notes
+
+v1.3 — file: stable-versions/cash-vault-signals-v1.3.pine
+
+Improvements
+- HTF demand/supply POI aligned with LuxAlgo storeOrdeBlock: slice from swing pivot bar to structure-break bar; configurable wide-bar swap (default off for FX), break tolerance in × HTF ATR, extended fallback lookback.
+- HTF LuxAlgo-style S&R bands merged into POI: long bias includes latest support zone; short bias includes latest resistance zone (pivot + range-based band width).
+- FX-friendly defaults: liquidity room filter off by default; lower min distance when enabled; slightly wider iFVG proximity default.
+- Debug label can show merged HTF S&R band.
+
+Full history and older notes: see versions.txt in this folder.

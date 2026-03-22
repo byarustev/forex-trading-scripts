@@ -1,0 +1,72 @@
+================================================================================
+  SMC Blueprint Signals — Release notes (v1.1)
+  Source: cash-vault-signals-v1.1.pine
+================================================================================
+
+OVERVIEW
+--------
+Overlay indicator for Smart Money Concept (SMC) style setups: HTF bias, POI
+proximity, and structured entry criteria with calculated entry, stop loss,
+and take-profit levels. Designed around a configurable Bias TF (default 4H)
+and Entry Context TF (default 1H), with optional faster 5m / 15m confirmation.
+
+
+KEY FEATURES (THIS VERSION)
+---------------------------
+• HTF bias & structure
+  - Bias timeframe (default 4H) drives directional bias (BULL / BEAR) from
+    swing structure.
+  - External pivot length and sweep lookback for confirmation logic.
+
+• POI (Points of Interest)
+  - HTF Order Block + Fair Value Gap packing for zone bounds.
+  - Optional merge of LuxAlgo-style HTF swing Order Blocks into the POI box.
+  - POI tap / proximity checks before signals.
+
+• Entry criteria (priority: C1 → C2 → C3 → C4; fast mode: 5m > 15m > entry TF)
+  - C1: CHOCH + OB on the confirm timeframe.
+  - C2: Sweep + MSS on the confirm timeframe.
+  - C3: Inverted FVG (iFVG) near POI; on entry TF, Athena-style multi-FVG
+    history + inversion rules (configurable).
+  - C4: Limit-style OB+FVG cluster inside HTF POI with approach filter.
+
+• Risk & targets
+  - SL modes: (1) Structure — beyond last HTF swing low/high (Bias TF) with
+    pad, or (2) HTF POI box — beyond poiBot / poiTop with ATR pad; stepped
+    fixes if SL is on the wrong side of entry.
+  - TPs: TP1 = 1R; TP2 = HTF liquidity clamp between 2R–3R where applicable;
+    TP3 = 5R.
+
+• Chart & alerts
+  - Entry line + optional SL / TP1–TP3 segments, labels, vertical connector.
+  - Optional show/hide SL & TPs; entry label tooltip can carry full SL/TP text.
+  - JSON alert payload: instruction, entryMode, criteria, bias, entry, SL,
+    TP1–TP3, risk, asset / tickerId, confirm TF, slPlacement, timestamp.
+
+
+WHAT IT DOES WELL (CURRENT FEEDBACK)
+------------------------------------
+• Strong at timing swing-style entries when aligned with the HTF (e.g. 4H)
+  map — clean narrative from bias → POI → confirm → levels.
+• Clear, rule-based SL and TP1–TP3 for each valid signal (subject to inputs).
+
+
+KNOWN LIMITATIONS & FOLLOW-UPS
+------------------------------
+• Continuation areas: the indicator can still produce low-quality or “wrong”
+  signals in continuation / trend-stretch contexts. Filtering or context rules
+  for continuation vs reversal are a planned improvement.
+
+• Internal / nuanced entries: some setups that are “inside” structure or
+  zones can get SL distances that don’t match discretionary placement; SL
+  logic refinement for those cases is on the backlog.
+
+
+DISCLAIMER
+----------
+Not financial advice. Past behaviour of the script does not guarantee future
+results. Always validate signals against your own rules and risk management.
+
+================================================================================
+  End of release-v1.1.txt
+================================================================================

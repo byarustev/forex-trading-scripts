@@ -1,0 +1,767 @@
+//@version=5
+indicator("SMC Blueprint Signals v1", "SMC Blueprint Signals v1", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+// -------------------------------------------------------------------------------------------------
+// Inputs
+// -------------------------------------------------------------------------------------------------
+groupTf = "Timeframes"
+tfBias = input.timeframe("240", "Bias TF (HTF)", group = groupTf)
+tfEntry = input.timeframe("60", "Entry Context TF", group = groupTf)
+useFastConfirm = input.bool(true, "Use fast LTF confirmation (5m / 15m vs 1H entry TF)", group = groupTf)
+fastConfirm5m = input.bool(true, "Fast: include 5m confirmation", group = groupTf)
+fastConfirm15m = input.bool(true, "Fast: include 15m confirmation", group = groupTf)
+// When fast mode is on, C1–C2 still use 5m/15m only; this adds 1H (tfEntry) C3 IFVG after fast C3 checks.
+fastPlus1hIfvg = input.bool(true, "When fast on: also allow 1H IFVG (C3 on entry TF)", group = groupTf)
+
+groupStruct = "Structure"
+extLen = input.int(4, "External Pivot Length", minval = 2, group = groupStruct)
+sweepLookback = input.int(20, "Sweep Lookback", minval = 5, group = groupStruct)
+
+groupRisk = "Risk"
+rrTarget = input.float(2.0, "Target RR (legacy; TPs use fixed R)", minval = 1.0, step = 0.25, group = groupRisk)
+slMode = input.string("Structure (swing + pad)", "SL placement", options = ["Structure (swing + pad)", "HTF POI box"], group = groupRisk, tooltip = "Structure: SL beyond the last swing low (long) / swing high (short) on the Bias TF (HTF), not LTF. Usually wider than LTF pivots. HTF POI box: legacy — SL beyond POI floor/ceiling + pad.")
+slAtrPad = input.float(0.15, "POI mode: padding beyond POI box (× HTF ATR)", minval = 0.0, step = 0.05, group = groupRisk, tooltip = "Used when SL placement = HTF POI box. Long: below poiBot. Short: above poiTop. Stepped if SL on wrong side of entry.")
+slStructPivotLen = input.int(3, "Structure mode: pivot length (Bias TF / HTF)", minval = 2, maxval = 8, group = groupRisk, tooltip = "Pivot length for last swing high/low on the Bias TF (same as HTF bias map). Smaller = more recent HTF swings.")
+slStructPadMult = input.float(0.12, "Structure mode: SL pad (× Bias TF ATR)", minval = 0.0, step = 0.02, group = groupRisk, tooltip = "Buffer beyond the HTF swing pivot, using Bias TF ATR. 0 = a few ticks only.")
+
+groupPoi = "POI / Proximity"
+proxAtrMult = input.float(1.5, "iFVG Proximity ATR Mult", minval = 0.2, step = 0.1, group = groupPoi, tooltip = "How close iFVG mid must be to POI mid (× confirm-TF ATR). Slightly higher default helps quiet FX pairs.")
+approachAtrMult = input.float(0.8, "C4 Approach ATR Mult", minval = 0.1, step = 0.1, group = groupPoi)
+useHtfSwingObPoi = input.bool(true, "Merge HTF Demand / Supply (LuxAlgo swing OB) into POI", group = groupPoi, tooltip = "LuxAlgo smart-money-concepts: on bullish structure break (close above last swing high) the Demand zone is the candle with minimum parsed low from that swing pivot bar through the break bar; on bearish break, Supply = max parsed high in that range. Union with OB+FVG POI box. No separate rally required—zone is defined by the structure break.")
+htfSwingObLookback = input.int(100, "Fallback: max bars to search (HTF)", minval = 10, maxval = 400, group = groupPoi, tooltip = "Used only if pivot bar index is unavailable; primary search is pivot bar → break bar (LuxAlgo storeOrdeBlock slice).")
+htfSwingObAtrLen = input.int(200, "Swing OB volatility ATR length", minval = 14, maxval = 500, group = groupPoi, tooltip = "Used to flag wide bars and swap parsed high/low (same idea as LuxAlgo order block filter).")
+htfDsVolBarMult = input.float(0.0, "HTF D/S: wide-bar filter (× ATR, 0 = off)", minval = 0.0, maxval = 10.0, step = 0.1, group = groupPoi, tooltip = "LuxAlgo swaps wicks on very wide bars when range ≥ this × ATR. 0 = never swap (raw OHLC only)—often better on FX majors. Try 2.5–3 if you want LuxAlgo-like filtering.")
+htfDsBreakRelaxAtr = input.float(0.06, "HTF D/S: break tolerance (× HTF ATR)", minval = 0.0, maxval = 0.5, step = 0.01, group = groupPoi, tooltip = "Eases close-through pivot on tight FX ranges: bull break vs swing high − this×ATR; bear break vs swing low + this×ATR. 0 = strict LuxAlgo close.")
+htfDsMaxSliceBars = input.int(500, "HTF D/S: max bars in pivot→break slice", minval = 50, maxval = 500, group = groupPoi, tooltip = "Caps the loop for min parsed low / max parsed high (Pine limit 500).")
+requirePoiLiquidityRoom = input.bool(false, "Require min room: HTF POI → HTF liquidity", group = groupPoi, tooltip = "When on, skips setups when POI is squeezed vs HTF liquidity. Off by default—FX often failed this at 1×ATR. Enable and set min distance if you want the filter back.")
+minPoiLiquidityRoomAtr = input.float(0.5, "Min POI→liquidity distance (× HTF ATR)", minval = 0.0, step = 0.1, group = groupPoi, tooltip = "Long: POI top to HTF swing high. Short: POI bottom to HTF swing low. Lower values (e.g. 0.3–0.6) suit FX; 0 = any room passes.")
+useHtfSrPoi = input.bool(true, "Merge HTF Support / Resistance zones (LuxAlgo S&R)", group = groupPoi, tooltip = "From support-resistance-signals.pine: pivot high → resistance band; pivot low → support band; band width uses (range/highest)×0.17×margin. Long bias unions latest HTF support zone; short bias unions latest HTF resistance zone.")
+srDetLen = input.int(15, "HTF S&R detection length (bars)", minval = 3, maxval = 50, group = groupPoi, tooltip = "Pivot length on Bias TF, same role as LuxAlgo Detection Length (scaled on their script per chart; here it is native HTF bars).")
+srMargin = input.float(2.0, "HTF S&R margin (LuxAlgo srMR)", minval = 0.1, maxval = 10.0, step = 0.1, group = groupPoi, tooltip = "Scales zone thickness around pivot level (see LuxAlgo Support Resistance Margin).")
+
+groupRange = "Range filter (entry TF)"
+minAdxEntryTf = input.float(14.0, "Min ADX (0 = off)", minval = 0.0, maxval = 50.0, step = 1.0, group = groupRange, tooltip = "Uses ADX on Entry Context TF. Low ADX ≈ chop / range; signals blocked when ADX is below this. Default 14 is loose; try 18–22 for stricter, 0 to disable.")
+adxDiLen = input.int(14, "ADX +DI/−DI length", minval = 2, maxval = 50, group = groupRange)
+adxSmooth = input.int(14, "ADX smoothing", minval = 1, maxval = 50, group = groupRange)
+
+// C3 on entry TF only: Athena-style multi-FVG history (5m/15m C3 unchanged)
+groupC3Ent = "C3 Entry TF — Athena iFVG"
+ifvgTrackAtrMult = input.float(1.0, "Start tracking FVGs within (× entry ATR) of POI mid", minval = 0.2, step = 0.1, group = groupC3Ent, tooltip = "Only push 1H FVGs into history when |close − POI mid| ≤ this × ATR.")
+maxHistFvg = input.int(15, "Max stored entry-TF FVGs", minval = 5, maxval = 30, group = groupC3Ent)
+minFvgAtr = input.float(0.2, "Min FVG size (× entry ATR)", minval = 0.0, step = 0.02, group = groupC3Ent, tooltip = "0 = no minimum. Same idea as Athena: filter tiny gaps.")
+fvgUseBody = input.bool(false, "Entry-TF FVG: body only (no wicks)", group = groupC3Ent, tooltip = "When on, gap uses candle body bounds like Athena body mode.")
+
+groupView = "Display"
+showDebug = input.bool(false, "Show Debug Labels", group = groupView)
+entryLineBars = input.int(10, "Entry line length (bars)", minval = 3, maxval = 50, group = groupView)
+slTpLabelTransp = input.int(78, "SL / TP label background transparency", minval = 50, maxval = 95, group = groupView, tooltip = "Higher = more transparent (less visual noise). Entry label unchanged.")
+showSlOnChart = input.bool(true, "Show SL line & label on chart", group = groupView)
+showTpOnChart = input.bool(true, "Show TP1–TP3 lines & labels on chart", group = groupView)
+showRiskConnector = input.bool(true, "Show vertical connector (links visible levels)", group = groupView)
+showRiskInEntryTooltip = input.bool(true, "SL/TP in entry label tooltip (hover entry)", group = groupView, tooltip = "Pine cannot toggle drawings on hover; use this to see SL + TPs when hovering the entry label. Works even when chart TPs/SL are hidden.")
+
+// -------------------------------------------------------------------------------------------------
+// Utility
+// -------------------------------------------------------------------------------------------------
+f_safe(v, fallback) =>
+    na(v) ? fallback : v
+
+f_mid(a, b) =>
+    (a + b) * 0.5
+
+f_inRange(x, lo, hi) =>
+    x >= math.min(lo, hi) and x <= math.max(lo, hi)
+
+// Short label for timeframe string (e.g. "60" -> "1H", "15" -> "15m")
+f_tfShort(tf) =>
+    tf == "1" ? "1m" : tf == "3" ? "3m" : tf == "5" ? "5m" : tf == "15" ? "15m" : tf == "30" ? "30m" : tf == "45" ? "45m" : tf == "60" ? "1H" : tf == "120" ? "2H" : tf == "180" ? "3H" : tf == "240" ? "4H" : tf == "D" ? "D" : tf == "W" ? "W" : tf == "M" ? "M" : tf
+
+// Human-readable short name per internal criterion code (not C1..C4 on chart)
+// C1/C2/C3 on confirm TF: repeat TF for structure + OB (e.g. "5m CHOCH + 5m OB", "1H CHOCH + 1H OB")
+f_criterionDisplay(criterionCode, confirmTfStr) =>
+    tfL = f_tfShort(confirmTfStr)
+    criterionCode == "C1" ? tfL + " CHOCH + " + tfL + " OB" : criterionCode == "C2" ? tfL + " Sweep + " + tfL + " MSS" : criterionCode == "C3" ? tfL + " IFVG" : criterionCode == "C4" ? "1H OB + FVG" : criterionCode
+
+// C4 = place limit at pre-built OB+FVG cluster; C1-C3 = confirmatory (react after conditions print)
+f_isLimitOrder(criterionCode) =>
+    criterionCode == "C4"
+
+// Alert/label: limit → lead with "Limit order:"; confirmatory → end with " Now"
+f_entryInstruction(criterionCode, criterionDisplay, isLong, entryPrice) =>
+    dir = isLong ? "LONG" : "SHORT"
+    px = str.tostring(entryPrice, format.mintick)
+    core = criterionDisplay + " " + dir + " @ " + px
+    f_isLimitOrder(criterionCode) ? "Limit order: " + core : core + " Now"
+
+// -------------------------------------------------------------------------------------------------
+// Structure Mapping (LuxAlgo-inspired: external via slower pivots, internal via faster pivots)
+// -------------------------------------------------------------------------------------------------
+f_lastPivotHigh(len) =>
+    ta.valuewhen(not na(ta.pivothigh(high, len, len)), ta.pivothigh(high, len, len), 0)
+
+f_lastPivotLow(len) =>
+    ta.valuewhen(not na(ta.pivotlow(low, len, len)), ta.pivotlow(low, len, len), 0)
+
+f_obFvgPack() =>
+    bullObTop = ta.valuewhen(close[1] < open[1] and close > high[1], high[1], 0)
+    bullObBot = ta.valuewhen(close[1] < open[1] and close > high[1], low[1], 0)
+    bearObTop = ta.valuewhen(close[1] > open[1] and close < low[1], high[1], 0)
+    bearObBot = ta.valuewhen(close[1] > open[1] and close < low[1], low[1], 0)
+    bullFvgTop = ta.valuewhen(low > high[2], low, 0)
+    bullFvgBot = ta.valuewhen(low > high[2], high[2], 0)
+    bearFvgTop = ta.valuewhen(high < low[2], low[2], 0)
+    bearFvgBot = ta.valuewhen(high < low[2], high, 0)
+    [bullObTop, bullObBot, bearObTop, bearObBot, bullFvgTop, bullFvgBot, bearFvgTop, bearFvgBot]
+
+// LuxAlgo HTF Demand / Supply (swing order blocks): same slice as smart-money-concepts.pine storeOrdeBlock — from swing pivot bar to structure-break bar, Demand = bar with min parsed low (bullish BOS/CHoCH), Supply = bar with max parsed high (bearish). Not a fixed lookback from the break bar.
+f_htfSwingObPoi() =>
+    float atrM = ta.atr(htfSwingObAtrLen)
+    bool highVol = htfDsVolBarMult > 0.0 and not na(atrM) and atrM > 0 and (high - low) >= htfDsVolBarMult * atrM
+    float parsedHigh = highVol ? low : high
+    float parsedLow = highVol ? high : low
+    float ph = ta.pivothigh(high, extLen, extLen)
+    float pl = ta.pivotlow(low, extLen, extLen)
+    var int lastPhBar = na
+    var int lastPlBar = na
+    if not na(ph)
+        lastPhBar := bar_index - extLen
+    if not na(pl)
+        lastPlBar := bar_index - extLen
+    float lastSwingHigh = ta.valuewhen(not na(ph), ph, 0)
+    float lastSwingLow = ta.valuewhen(not na(pl), pl, 0)
+    float relaxPx = not na(atrM) and atrM > 0 ? atrM * htfDsBreakRelaxAtr : 0.0
+    float bullBreakLvl = not na(lastSwingHigh) ? lastSwingHigh - relaxPx : na
+    float bearBreakLvl = not na(lastSwingLow) ? lastSwingLow + relaxPx : na
+    bool bullBreak = not na(bullBreakLvl) and ta.crossover(close, bullBreakLvl)
+    bool bearBreak = not na(bearBreakLvl) and ta.crossunder(close, bearBreakLvl)
+    float bufBullTop = na
+    float bufBullBot = na
+    if bullBreak
+        float minL = parsedLow[0]
+        float t = parsedHigh[0]
+        int span = not na(lastPhBar) ? math.max(0, bar_index - lastPhBar) : htfSwingObLookback
+        int k = math.min(span, htfDsMaxSliceBars)
+        for i = 0 to k
+            if parsedLow[i] < minL
+                minL := parsedLow[i]
+                t := parsedHigh[i]
+        bufBullTop := t
+        bufBullBot := minL
+    float bufBearTop = na
+    float bufBearBot = na
+    if bearBreak
+        float maxH = parsedHigh[0]
+        float b = parsedLow[0]
+        int span2 = not na(lastPlBar) ? math.max(0, bar_index - lastPlBar) : htfSwingObLookback
+        int k2 = math.min(span2, htfDsMaxSliceBars)
+        for i = 0 to k2
+            if parsedHigh[i] > maxH
+                maxH := parsedHigh[i]
+                b := parsedLow[i]
+        bufBearTop := maxH
+        bufBearBot := b
+    float lastBullObTop = ta.valuewhen(bullBreak, bufBullTop, 0)
+    float lastBullObBot = ta.valuewhen(bullBreak, bufBullBot, 0)
+    float lastBearObTop = ta.valuewhen(bearBreak, bufBearTop, 0)
+    float lastBearObBot = ta.valuewhen(bearBreak, bufBearBot, 0)
+    [lastBullObTop, lastBullObBot, lastBearObTop, lastBearObBot]
+
+// LuxAlgo MTF S&R (support-resistance-signals.pine): pivothigh → resistance zone top=ph, bottom=ph×(1−m); pivotlow → support bottom=pl, top=pl×(1+m); m = (pHST−pLST)/pHST × 0.17 × srMargin
+f_htfLuxSrPoi() =>
+    float pHST = ta.highest(high, srDetLen)
+    float pLST = ta.lowest(low, srDetLen)
+    float rng = pHST > 0 ? (pHST - pLST) / pHST : 0.0
+    float m = rng * 0.17 * srMargin
+    float ph = ta.pivothigh(high, srDetLen, srDetLen)
+    float pl = ta.pivotlow(low, srDetLen, srDetLen)
+    float resTop = na
+    float resBot = na
+    float supTop = na
+    float supBot = na
+    if not na(ph)
+        resTop := ph
+        resBot := ph * (1 - m)
+    if not na(pl)
+        supBot := pl
+        supTop := pl * (1 + m)
+    float lastResTop = ta.valuewhen(not na(ph), resTop, 0)
+    float lastResBot = ta.valuewhen(not na(ph), resBot, 0)
+    float lastSupTop = ta.valuewhen(not na(pl), supTop, 0)
+    float lastSupBot = ta.valuewhen(not na(pl), supBot, 0)
+    [lastResTop, lastResBot, lastSupTop, lastSupBot]
+
+// Athena-style 3-candle FVG on the series timeframe (used for C3 on tfEntry only)
+f_athenaFvgEntryTf() =>
+    bull_fvg_w = high[3] < low[1]
+    bear_fvg_w = low[3] > high[1]
+    float body_hi_3 = math.max(open[3], close[3])
+    float body_lo_3 = math.min(open[3], close[3])
+    float body_hi_1 = math.max(open[1], close[1])
+    float body_lo_1 = math.min(open[1], close[1])
+    bool bull_fvg_body_ok = body_hi_3 < body_lo_1
+    bool bear_fvg_body_ok = body_lo_3 > body_hi_1
+    float fvg_bull_t_w = low[1]
+    float fvg_bull_b_w = high[3]
+    float fvg_bear_t_w = low[3]
+    float fvg_bear_b_w = high[1]
+    float fvg_bull_t_body = body_lo_1
+    float fvg_bull_b_body = body_hi_3
+    float fvg_bear_t_body = body_lo_3
+    float fvg_bear_b_body = body_hi_1
+    bool bull_fvg_ok_use = fvgUseBody ? bull_fvg_body_ok : bull_fvg_w
+    bool bear_fvg_ok_use = fvgUseBody ? bear_fvg_body_ok : bear_fvg_w
+    float fvg_bull_t_use = fvgUseBody ? fvg_bull_t_body : fvg_bull_t_w
+    float fvg_bull_b_use = fvgUseBody ? fvg_bull_b_body : fvg_bull_b_w
+    float fvg_bear_t_use = fvgUseBody ? fvg_bear_t_body : fvg_bear_t_w
+    float fvg_bear_b_use = fvgUseBody ? fvg_bear_b_body : fvg_bear_b_w
+    float atr_f = ta.atr(14)
+    bool fvg_bull_big_enough = minFvgAtr <= 0.0 or (not na(atr_f) and atr_f > 0 and (fvg_bull_t_use - fvg_bull_b_use) >= atr_f * minFvgAtr)
+    bool fvg_bear_big_enough = minFvgAtr <= 0.0 or (not na(atr_f) and atr_f > 0 and (fvg_bear_t_use - fvg_bear_b_use) >= atr_f * minFvgAtr)
+    bool bullish_fvg = bull_fvg_ok_use and fvg_bull_big_enough
+    bool bearish_fvg = bear_fvg_ok_use and fvg_bear_big_enough
+    bool new_bear = bearish_fvg and not bearish_fvg[1]
+    bool new_bull = bullish_fvg and not bullish_fvg[1]
+    [new_bear, new_bull, fvg_bear_t_use, fvg_bear_b_use, fvg_bull_t_use, fvg_bull_b_use, close]
+
+// Single security tuple for confirm TF (reduces request.security count)
+f_confirmTuple() =>
+    [close, high, low, ta.atr(14), f_lastPivotHigh(extLen), f_lastPivotLow(extLen), ta.lowest(low, 10), ta.highest(high, 10), ta.lowest(low, sweepLookback)[1], ta.highest(high, sweepLookback)[1]]
+
+// Last swing low / high on series TF for structure-based SL (padding uses Bias TF ATR separately)
+f_structSlPivots(len) =>
+    float pl = ta.valuewhen(not na(ta.pivotlow(low, len, len)), ta.pivotlow(low, len, len), 0)
+    float ph = ta.valuewhen(not na(ta.pivothigh(high, len, len)), ta.pivothigh(high, len, len), 0)
+    [pl, ph]
+
+// ADX on series TF (used on tfEntry via request.security) — weak trend / range when ADX is low
+f_entryTfAdx() =>
+    [_, _, adx] = ta.dmi(adxDiLen, adxSmooth)
+    adx
+
+// External structure on 4H (bias map)
+htfClose = request.security(syminfo.tickerid, tfBias, close, lookahead = barmerge.lookahead_off)
+htfSwingHigh = request.security(syminfo.tickerid, tfBias, f_lastPivotHigh(extLen), lookahead = barmerge.lookahead_off)
+htfSwingLow = request.security(syminfo.tickerid, tfBias, f_lastPivotLow(extLen), lookahead = barmerge.lookahead_off)
+htfATR = request.security(syminfo.tickerid, tfBias, ta.atr(14), lookahead = barmerge.lookahead_off)
+
+var int externalBias = 0
+prevBias = nz(externalBias[1], 0)
+atr = htfATR
+bullBreak = htfClose > htfSwingHigh
+bearBreak = htfClose < htfSwingLow
+bullCHOCH = prevBias == -1 and bullBreak and (htfClose - htfSwingHigh) > atr * 0.2
+bearCHOCH = prevBias == 1 and bearBreak and (htfSwingLow - htfClose) > atr * 0.2
+externalBias := bullCHOCH ? 1 : bearCHOCH ? -1 : bullBreak ? 1 : bearBreak ? -1 : prevBias
+
+strongLow = externalBias == 1 ? htfSwingLow : na
+weakHigh = externalBias == 1 ? htfSwingHigh : na
+strongHigh = externalBias == -1 ? htfSwingHigh : na
+weakLow = externalBias == -1 ? htfSwingLow : na
+
+// Entry context structure on 1H
+h1Close = request.security(syminfo.tickerid, tfEntry, close, lookahead = barmerge.lookahead_off)
+h1High = request.security(syminfo.tickerid, tfEntry, high, lookahead = barmerge.lookahead_off)
+h1Low = request.security(syminfo.tickerid, tfEntry, low, lookahead = barmerge.lookahead_off)
+h1ATR = request.security(syminfo.tickerid, tfEntry, ta.atr(14), lookahead = barmerge.lookahead_off)
+h1SwingHigh = request.security(syminfo.tickerid, tfEntry, f_lastPivotHigh(extLen), lookahead = barmerge.lookahead_off)
+h1SwingLow = request.security(syminfo.tickerid, tfEntry, f_lastPivotLow(extLen), lookahead = barmerge.lookahead_off)
+
+h1Eq = f_mid(h1SwingHigh, h1SwingLow)
+inDiscount = h1Close < h1Eq
+inPremium = h1Close > h1Eq
+zoneOk = (externalBias == 1 and inDiscount) or (externalBias == -1 and inPremium)
+
+// 1H CHoCH conflict guard
+h1BullBreak = ta.crossover(h1Close, h1SwingHigh)
+h1BearBreak = ta.crossunder(h1Close, h1SwingLow)
+var int h1Trend = 0
+h1Trend := h1BullBreak ? 1 : h1BearBreak ? -1 : nz(h1Trend[1], 0)
+h1Conflict = (externalBias == 1 and h1Trend == -1) or (externalBias == -1 and h1Trend == 1)
+
+entryTfAdx = request.security(syminfo.tickerid, tfEntry, f_entryTfAdx(), lookahead = barmerge.lookahead_off)
+entryTfTrendOk = minAdxEntryTf <= 0.0 or (not na(entryTfAdx) and entryTfAdx >= minAdxEntryTf)
+
+// -------------------------------------------------------------------------------------------------
+// 4H POIs (OB + FVG) and active tap logic
+// -------------------------------------------------------------------------------------------------
+[htfBullObTop, htfBullObBot, htfBearObTop, htfBearObBot, htfBullFvgTop, htfBullFvgBot, htfBearFvgTop, htfBearFvgBot] = request.security(syminfo.tickerid, tfBias, f_obFvgPack(), lookahead = barmerge.lookahead_off)
+[htfSwBullObTop, htfSwBullObBot, htfSwBearObTop, htfSwBearObBot] = request.security(syminfo.tickerid, tfBias, f_htfSwingObPoi(), lookahead = barmerge.lookahead_off)
+[htfSrResTop, htfSrResBot, htfSrSupTop, htfSrSupBot] = request.security(syminfo.tickerid, tfBias, f_htfLuxSrPoi(), lookahead = barmerge.lookahead_off)
+
+float basePoiTop = externalBias == 1 ? f_safe(htfBullObTop, htfBullFvgTop) : f_safe(htfBearObTop, htfBearFvgTop)
+float basePoiBot = externalBias == 1 ? f_safe(htfBullObBot, htfBullFvgBot) : f_safe(htfBearObBot, htfBearFvgBot)
+float htfSwingObTop = externalBias == 1 ? htfSwBullObTop : htfSwBearObTop
+float htfSwingObBot = externalBias == 1 ? htfSwBullObBot : htfSwBearObBot
+bool htfSwingObOk = useHtfSwingObPoi and externalBias != 0 and not na(htfSwingObTop) and not na(htfSwingObBot)
+float poiAfterSwingTop = htfSwingObOk ? math.max(basePoiTop, htfSwingObTop) : basePoiTop
+float poiAfterSwingBot = htfSwingObOk ? math.min(basePoiBot, htfSwingObBot) : basePoiBot
+// Bias-aligned LuxAlgo S&R: long → widen POI with latest HTF support band; short → resistance band
+float htfSrPoiTop = externalBias == 1 ? htfSrSupTop : externalBias == -1 ? htfSrResTop : na
+float htfSrPoiBot = externalBias == 1 ? htfSrSupBot : externalBias == -1 ? htfSrResBot : na
+bool htfSrOk = useHtfSrPoi and externalBias != 0 and not na(htfSrPoiTop) and not na(htfSrPoiBot)
+float poiTop = htfSrOk ? math.max(poiAfterSwingTop, htfSrPoiTop) : poiAfterSwingTop
+float poiBot = htfSrOk ? math.min(poiAfterSwingBot, htfSrPoiBot) : poiAfterSwingBot
+poiMid = f_mid(poiTop, poiBot)
+
+poiTapped = h1High >= poiBot and h1Low <= poiTop
+
+// HTF POI must leave enough runway to HTF liquidity (same pivots TP2 references) — avoids “stuffed” POIs with no room for targets
+float minPoiLiqRoomPx = not na(htfATR) and htfATR > 0 and minPoiLiquidityRoomAtr > 0 ? htfATR * minPoiLiquidityRoomAtr : na
+float poiToHtfLiqRoom = na
+if externalBias == 1 and not na(htfSwingHigh) and not na(poiTop)
+    poiToHtfLiqRoom := htfSwingHigh - poiTop
+else if externalBias == -1 and not na(htfSwingLow) and not na(poiBot)
+    poiToHtfLiqRoom := poiBot - htfSwingLow
+poiLiquidityRoomOk = (not requirePoiLiquidityRoom or minPoiLiquidityRoomAtr <= 0 or na(minPoiLiqRoomPx)) ? true : (not na(poiToHtfLiqRoom) and poiToHtfLiqRoom >= minPoiLiqRoomPx)
+
+setupContextOk = externalBias != 0 and zoneOk and not h1Conflict and not na(poiTop) and not na(poiBot) and poiLiquidityRoomOk
+
+// C3 entry-TF only: Athena-style FVG history (cleared on HTF bias change)
+var array<float> hist_fvg_bear_tops = array.new_float(0)
+var array<float> hist_fvg_bear_bots = array.new_float(0)
+var array<float> hist_fvg_bull_tops = array.new_float(0)
+var array<float> hist_fvg_bull_bots = array.new_float(0)
+
+if externalBias != nz(externalBias[1], 0)
+    array.clear(hist_fvg_bear_tops)
+    array.clear(hist_fvg_bear_bots)
+    array.clear(hist_fvg_bull_tops)
+    array.clear(hist_fvg_bull_bots)
+
+// -------------------------------------------------------------------------------------------------
+// Confirmation: entry TF (1H) + optional fast 5m + 15m (OR merge, 5m priority over 15m)
+// -------------------------------------------------------------------------------------------------
+useFastLtf = useFastConfirm and (fastConfirm5m or fastConfirm15m)
+
+// Entry TF (1H) — packed tuple + OB/FVG
+[entClose, entHigh, entLow, entATR, entSwingHigh, entSwingLow, entImpLow, entImpHigh, entSweepLow, entSweepHigh] = request.security(syminfo.tickerid, tfEntry, f_confirmTuple(), lookahead = barmerge.lookahead_off)
+[entBullObTop, entBullObBot, entBearObTop, entBearObBot, entBullFvgTop, entBullFvgBot, entBearFvgTop, entBearFvgBot] = request.security(syminfo.tickerid, tfEntry, f_obFvgPack(), lookahead = barmerge.lookahead_off)
+
+// Athena 3-candle FVG on tfEntry — used only for C3 (ent); C1/C2/C4 still use f_obFvgPack above
+[athenaNewBearFvg, athenaNewBullFvg, athenaBearFvgTop, athenaBearFvgBot, athenaBullFvgTop, athenaBullFvgBot, athenaTfClose] = request.security(syminfo.tickerid, tfEntry, f_athenaFvgEntryTf(), lookahead = barmerge.lookahead_off)
+
+// HTF (Bias TF) swing pivots for structure-based SL — same timeframe as bias / POI, not LTF confirm
+[sl_plHtf, sl_phHtf] = request.security(syminfo.tickerid, tfBias, f_structSlPivots(slStructPivotLen), lookahead = barmerge.lookahead_off)
+
+// Start logging FVGs only when price is near HTF POI (approach), same 1H series as context
+distToPoiMid = math.abs(h1Close - poiMid)
+trackingActiveEnt = setupContextOk and not na(h1ATR) and h1ATR > 0 and distToPoiMid <= h1ATR * ifvgTrackAtrMult
+
+// Counter-trend FVGs vs bias: bull bias stores bear gaps (for long iFVG); bear bias stores bull gaps (for short iFVG)
+if trackingActiveEnt and externalBias == 1 and athenaNewBearFvg and not na(athenaBearFvgTop) and not na(athenaBearFvgBot)
+    int nBear = array.size(hist_fvg_bear_tops)
+    bool dupBear = false
+    if nBear > 0
+        dupBear := array.get(hist_fvg_bear_tops, nBear - 1) == athenaBearFvgTop and array.get(hist_fvg_bear_bots, nBear - 1) == athenaBearFvgBot
+    if not dupBear
+        while array.size(hist_fvg_bear_tops) >= maxHistFvg
+            array.shift(hist_fvg_bear_tops)
+            array.shift(hist_fvg_bear_bots)
+        array.push(hist_fvg_bear_tops, athenaBearFvgTop)
+        array.push(hist_fvg_bear_bots, athenaBearFvgBot)
+
+if trackingActiveEnt and externalBias == -1 and athenaNewBullFvg and not na(athenaBullFvgTop) and not na(athenaBullFvgBot)
+    int nBull = array.size(hist_fvg_bull_tops)
+    bool dupBull = false
+    if nBull > 0
+        dupBull := array.get(hist_fvg_bull_tops, nBull - 1) == athenaBullFvgTop and array.get(hist_fvg_bull_bots, nBull - 1) == athenaBullFvgBot
+    if not dupBull
+        while array.size(hist_fvg_bull_tops) >= maxHistFvg
+            array.shift(hist_fvg_bull_tops)
+            array.shift(hist_fvg_bull_bots)
+        array.push(hist_fvg_bull_tops, athenaBullFvgTop)
+        array.push(hist_fvg_bull_bots, athenaBullFvgBot)
+
+// Inversion = full entry-TF close through stored gap (first match): long = close above bear gap top; short = close below bull gap bottom (use athenaTfClose = same TF close as FVG pack)
+int inv_c3_long_idx = -1
+int nbHistBear = array.size(hist_fvg_bear_tops)
+if nbHistBear > 0
+    for i = 0 to nbHistBear - 1
+        if inv_c3_long_idx < 0 and not na(athenaTfClose) and athenaTfClose > array.get(hist_fvg_bear_tops, i)
+            inv_c3_long_idx := i
+            break
+
+int inv_c3_short_idx = -1
+int nbHistBull = array.size(hist_fvg_bull_tops)
+if nbHistBull > 0
+    for i = 0 to nbHistBull - 1
+        if inv_c3_short_idx < 0 and not na(athenaTfClose) and athenaTfClose < array.get(hist_fvg_bull_bots, i)
+            inv_c3_short_idx := i
+            break
+
+float c3EntBearFvgTop = inv_c3_long_idx >= 0 ? array.get(hist_fvg_bear_tops, inv_c3_long_idx) : na
+float c3EntBearFvgBot = inv_c3_long_idx >= 0 ? array.get(hist_fvg_bear_bots, inv_c3_long_idx) : na
+float c3EntBullFvgTop = inv_c3_short_idx >= 0 ? array.get(hist_fvg_bull_tops, inv_c3_short_idx) : na
+float c3EntBullFvgBot = inv_c3_short_idx >= 0 ? array.get(hist_fvg_bull_bots, inv_c3_short_idx) : na
+float c3EntBearFvgMid = not na(c3EntBearFvgTop) and not na(c3EntBearFvgBot) ? f_mid(c3EntBearFvgTop, c3EntBearFvgBot) : na
+float c3EntBullFvgMid = not na(c3EntBullFvgTop) and not na(c3EntBullFvgBot) ? f_mid(c3EntBullFvgTop, c3EntBullFvgBot) : na
+
+// 5m fast
+[f5Close, f5High, f5Low, f5ATR, f5SwingHigh, f5SwingLow, f5ImpLow, f5ImpHigh, f5SweepLow, f5SweepHigh] = request.security(syminfo.tickerid, "5", f_confirmTuple(), lookahead = barmerge.lookahead_off)
+[f5BullObTop, f5BullObBot, f5BearObTop, f5BearObBot, f5BullFvgTop, f5BullFvgBot, f5BearFvgTop, f5BearFvgBot] = request.security(syminfo.tickerid, "5", f_obFvgPack(), lookahead = barmerge.lookahead_off)
+
+// 15m fast
+[f15Close, f15High, f15Low, f15ATR, f15SwingHigh, f15SwingLow, f15ImpLow, f15ImpHigh, f15SweepLow, f15SweepHigh] = request.security(syminfo.tickerid, "15", f_confirmTuple(), lookahead = barmerge.lookahead_off)
+[f15BullObTop, f15BullObBot, f15BearObTop, f15BearObBot, f15BullFvgTop, f15BullFvgBot, f15BearFvgTop, f15BearFvgBot] = request.security(syminfo.tickerid, "15", f_obFvgPack(), lookahead = barmerge.lookahead_off)
+
+// --- MSS + golden zone + C1–C3 per confirm TF (ent = entry TF, f5/f15 = fast)
+bullMSS_ent = ta.crossover(entClose, entSwingHigh)
+bearMSS_ent = ta.crossunder(entClose, entSwingLow)
+bullMSS_5 = ta.crossover(f5Close, f5SwingHigh)
+bearMSS_5 = ta.crossunder(f5Close, f5SwingLow)
+bullMSS_15 = ta.crossover(f15Close, f15SwingHigh)
+bearMSS_15 = ta.crossunder(f15Close, f15SwingLow)
+
+bullGzHi_ent = entClose - (entClose - entImpLow) * 0.618
+bullGzLo_ent = entClose - (entClose - entImpLow) * 0.786
+bearGzLo_ent = entClose + (entImpHigh - entClose) * 0.618
+bearGzHi_ent = entClose + (entImpHigh - entClose) * 0.786
+bullGzHi_5 = f5Close - (f5Close - f5ImpLow) * 0.618
+bullGzLo_5 = f5Close - (f5Close - f5ImpLow) * 0.786
+bearGzLo_5 = f5Close + (f5ImpHigh - f5Close) * 0.618
+bearGzHi_5 = f5Close + (f5ImpHigh - f5Close) * 0.786
+bullGzHi_15 = f15Close - (f15Close - f15ImpLow) * 0.618
+bullGzLo_15 = f15Close - (f15Close - f15ImpLow) * 0.786
+bearGzLo_15 = f15Close + (f15ImpHigh - f15Close) * 0.618
+bearGzHi_15 = f15Close + (f15ImpHigh - f15Close) * 0.786
+
+c1Bull_ent = setupContextOk and externalBias == 1 and poiTapped and bullMSS_ent
+c1Bear_ent = setupContextOk and externalBias == -1 and poiTapped and bearMSS_ent
+c1Bull_5 = setupContextOk and externalBias == 1 and poiTapped and bullMSS_5
+c1Bear_5 = setupContextOk and externalBias == -1 and poiTapped and bearMSS_5
+c1Bull_15 = setupContextOk and externalBias == 1 and poiTapped and bullMSS_15
+c1Bear_15 = setupContextOk and externalBias == -1 and poiTapped and bearMSS_15
+
+c1BullEntryFinal_ent = f_inRange(f_mid(entBullObTop, entBullObBot), bullGzLo_ent, bullGzHi_ent) ? f_mid(entBullObTop, entBullObBot) : f_mid(bullGzLo_ent, bullGzHi_ent)
+c1BearEntryFinal_ent = f_inRange(f_mid(entBearObTop, entBearObBot), bearGzLo_ent, bearGzHi_ent) ? f_mid(entBearObTop, entBearObBot) : f_mid(bearGzLo_ent, bearGzHi_ent)
+c1BullEntryFinal_5 = f_inRange(f_mid(f5BullObTop, f5BullObBot), bullGzLo_5, bullGzHi_5) ? f_mid(f5BullObTop, f5BullObBot) : f_mid(bullGzLo_5, bullGzHi_5)
+c1BearEntryFinal_5 = f_inRange(f_mid(f5BearObTop, f5BearObBot), bearGzLo_5, bearGzHi_5) ? f_mid(f5BearObTop, f5BearObBot) : f_mid(bearGzLo_5, bearGzHi_5)
+c1BullEntryFinal_15 = f_inRange(f_mid(f15BullObTop, f15BullObBot), bullGzLo_15, bullGzHi_15) ? f_mid(f15BullObTop, f15BullObBot) : f_mid(bullGzLo_15, bullGzHi_15)
+c1BearEntryFinal_15 = f_inRange(f_mid(f15BearObTop, f15BearObBot), bearGzLo_15, bearGzHi_15) ? f_mid(f15BearObTop, f15BearObBot) : f_mid(bearGzLo_15, bearGzHi_15)
+
+bullSweep_ent = entLow < entSweepLow and entClose > entSweepLow
+bearSweep_ent = entHigh > entSweepHigh and entClose < entSweepHigh
+bullSweep_5 = f5Low < f5SweepLow and f5Close > f5SweepLow
+bearSweep_5 = f5High > f5SweepHigh and f5Close < f5SweepHigh
+bullSweep_15 = f15Low < f15SweepLow and f15Close > f15SweepLow
+bearSweep_15 = f15High > f15SweepHigh and f15Close < f15SweepHigh
+
+c2Bull_ent = setupContextOk and externalBias == 1 and poiTapped and bullSweep_ent and bullMSS_ent
+c2Bear_ent = setupContextOk and externalBias == -1 and poiTapped and bearSweep_ent and bearMSS_ent
+c2Bull_5 = setupContextOk and externalBias == 1 and poiTapped and bullSweep_5 and bullMSS_5
+c2Bear_5 = setupContextOk and externalBias == -1 and poiTapped and bearSweep_5 and bearMSS_5
+c2Bull_15 = setupContextOk and externalBias == 1 and poiTapped and bullSweep_15 and bullMSS_15
+c2Bear_15 = setupContextOk and externalBias == -1 and poiTapped and bearSweep_15 and bearMSS_15
+
+cBearFvgMid_ent = f_mid(entBearFvgTop, entBearFvgBot)
+cBullFvgMid_ent = f_mid(entBullFvgTop, entBullFvgBot)
+cBearFvgMid_5 = f_mid(f5BearFvgTop, f5BearFvgBot)
+cBullFvgMid_5 = f_mid(f5BullFvgTop, f5BullFvgBot)
+cBearFvgMid_15 = f_mid(f15BearFvgTop, f15BearFvgBot)
+cBullFvgMid_15 = f_mid(f15BullFvgTop, f15BullFvgBot)
+
+// Entry-TF C3 only: Athena iFVG (historical gaps + full close through gap); 5m/15m keep classic cross
+bullIFVG_ent = inv_c3_long_idx >= 0
+bearIFVG_ent = inv_c3_short_idx >= 0
+bullIFVG_5 = f5Close > f5BearFvgTop and f5Close[1] <= f5BearFvgTop
+bearIFVG_5 = f5Close < f5BullFvgBot and f5Close[1] >= f5BullFvgBot
+bullIFVG_15 = f15Close > f15BearFvgTop and f15Close[1] <= f15BearFvgTop
+bearIFVG_15 = f15Close < f15BullFvgBot and f15Close[1] >= f15BullFvgBot
+
+bullIfvgNearPoi_ent = not na(c3EntBearFvgMid) and math.abs(c3EntBearFvgMid - poiMid) <= entATR * proxAtrMult
+bearIfvgNearPoi_ent = not na(c3EntBullFvgMid) and math.abs(c3EntBullFvgMid - poiMid) <= entATR * proxAtrMult
+bullIfvgNearPoi_5 = math.abs(cBearFvgMid_5 - poiMid) <= f5ATR * proxAtrMult
+bearIfvgNearPoi_5 = math.abs(cBullFvgMid_5 - poiMid) <= f5ATR * proxAtrMult
+bullIfvgNearPoi_15 = math.abs(cBearFvgMid_15 - poiMid) <= f15ATR * proxAtrMult
+bearIfvgNearPoi_15 = math.abs(cBullFvgMid_15 - poiMid) <= f15ATR * proxAtrMult
+
+c3Bull_ent = setupContextOk and externalBias == 1 and poiTapped and bullIFVG_ent and bullIfvgNearPoi_ent
+c3Bear_ent = setupContextOk and externalBias == -1 and poiTapped and bearIFVG_ent and bearIfvgNearPoi_ent
+
+// Consume the inverted gap so it cannot re-fire (entry-TF C3 only)
+if c3Bull_ent
+    array.remove(hist_fvg_bear_tops, inv_c3_long_idx)
+    array.remove(hist_fvg_bear_bots, inv_c3_long_idx)
+if c3Bear_ent
+    array.remove(hist_fvg_bull_tops, inv_c3_short_idx)
+    array.remove(hist_fvg_bull_bots, inv_c3_short_idx)
+c3Bull_5 = setupContextOk and externalBias == 1 and poiTapped and bullIFVG_5 and bullIfvgNearPoi_5
+c3Bear_5 = setupContextOk and externalBias == -1 and poiTapped and bearIFVG_5 and bearIfvgNearPoi_5
+c3Bull_15 = setupContextOk and externalBias == 1 and poiTapped and bullIFVG_15 and bullIfvgNearPoi_15
+c3Bear_15 = setupContextOk and externalBias == -1 and poiTapped and bearIFVG_15 and bearIfvgNearPoi_15
+
+// C4: Pre-existing 1H OB + FVG cluster inside 4H POI (reuse entry-TF OB/FVG from ent* series)
+h1BullClusterMid = f_mid(f_mid(entBullObTop, entBullObBot), f_mid(entBullFvgTop, entBullFvgBot))
+h1BearClusterMid = f_mid(f_mid(entBearObTop, entBearObBot), f_mid(entBearFvgTop, entBearFvgBot))
+h1BullClusterInPoi = f_inRange(h1BullClusterMid, poiBot, poiTop)
+h1BearClusterInPoi = f_inRange(h1BearClusterMid, poiBot, poiTop)
+approachingBullCluster = h1Low > h1BullClusterMid and (h1Low - h1BullClusterMid) <= h1ATR * approachAtrMult
+approachingBearCluster = h1High < h1BearClusterMid and (h1BearClusterMid - h1High) <= h1ATR * approachAtrMult
+c4Bull = setupContextOk and externalBias == 1 and h1BullClusterInPoi and approachingBullCluster
+c4Bear = setupContextOk and externalBias == -1 and h1BearClusterInPoi and approachingBearCluster
+c4BullEntry = h1BullClusterMid
+c4BearEntry = h1BearClusterMid
+
+// -------------------------------------------------------------------------------------------------
+// Signal chooser (priority C1 > C2 > C3 > C4; within fast: 5m > 15m > entry TF)
+// -------------------------------------------------------------------------------------------------
+var bool signalLong = false
+var bool signalShort = false
+var string criterion = ""
+var string signalConfirmTf = ""
+var float entry = na
+var float sl = na
+var float tp = na
+var float tp1 = na
+var float tp2 = na
+var float tp3 = na
+var float rr = na
+
+signalLong := false
+signalShort := false
+criterion := ""
+signalConfirmTf := ""
+entry := na
+sl := na
+tp := na
+tp1 := na
+tp2 := na
+tp3 := na
+rr := na
+
+if useFastLtf
+    if c1Bull_5 and fastConfirm5m
+        signalLong := true
+        criterion := "C1"
+        entry := c1BullEntryFinal_5
+        signalConfirmTf := "5"
+    else if c1Bull_15 and fastConfirm15m
+        signalLong := true
+        criterion := "C1"
+        entry := c1BullEntryFinal_15
+        signalConfirmTf := "15"
+    else if c1Bear_5 and fastConfirm5m
+        signalShort := true
+        criterion := "C1"
+        entry := c1BearEntryFinal_5
+        signalConfirmTf := "5"
+    else if c1Bear_15 and fastConfirm15m
+        signalShort := true
+        criterion := "C1"
+        entry := c1BearEntryFinal_15
+        signalConfirmTf := "15"
+    else if c2Bull_5 and fastConfirm5m
+        signalLong := true
+        criterion := "C2"
+        entry := f_mid(f5BullObTop, f5BullObBot)
+        signalConfirmTf := "5"
+    else if c2Bull_15 and fastConfirm15m
+        signalLong := true
+        criterion := "C2"
+        entry := f_mid(f15BullObTop, f15BullObBot)
+        signalConfirmTf := "15"
+    else if c2Bear_5 and fastConfirm5m
+        signalShort := true
+        criterion := "C2"
+        entry := f_mid(f5BearObTop, f5BearObBot)
+        signalConfirmTf := "5"
+    else if c2Bear_15 and fastConfirm15m
+        signalShort := true
+        criterion := "C2"
+        entry := f_mid(f15BearObTop, f15BearObBot)
+        signalConfirmTf := "15"
+    else if c3Bull_5 and fastConfirm5m
+        signalLong := true
+        criterion := "C3"
+        entry := cBearFvgMid_5
+        signalConfirmTf := "5"
+    else if c3Bull_15 and fastConfirm15m
+        signalLong := true
+        criterion := "C3"
+        entry := cBearFvgMid_15
+        signalConfirmTf := "15"
+    else if c3Bear_5 and fastConfirm5m
+        signalShort := true
+        criterion := "C3"
+        entry := cBullFvgMid_5
+        signalConfirmTf := "5"
+    else if c3Bear_15 and fastConfirm15m
+        signalShort := true
+        criterion := "C3"
+        entry := cBullFvgMid_15
+        signalConfirmTf := "15"
+    // 1H (entry TF) IFVG — same C3 rules as ent*; runs only if no fast C1–C3 fired above
+    else if fastPlus1hIfvg and c3Bull_ent
+        signalLong := true
+        criterion := "C3"
+        entry := c3EntBearFvgMid
+        signalConfirmTf := tfEntry
+    else if fastPlus1hIfvg and c3Bear_ent
+        signalShort := true
+        criterion := "C3"
+        entry := c3EntBullFvgMid
+        signalConfirmTf := tfEntry
+else
+    if c1Bull_ent
+        signalLong := true
+        criterion := "C1"
+        entry := c1BullEntryFinal_ent
+        signalConfirmTf := tfEntry
+    else if c1Bear_ent
+        signalShort := true
+        criterion := "C1"
+        entry := c1BearEntryFinal_ent
+        signalConfirmTf := tfEntry
+    else if c2Bull_ent
+        signalLong := true
+        criterion := "C2"
+        entry := f_mid(entBullObTop, entBullObBot)
+        signalConfirmTf := tfEntry
+    else if c2Bear_ent
+        signalShort := true
+        criterion := "C2"
+        entry := f_mid(entBearObTop, entBearObBot)
+        signalConfirmTf := tfEntry
+    else if c3Bull_ent
+        signalLong := true
+        criterion := "C3"
+        entry := c3EntBearFvgMid
+        signalConfirmTf := tfEntry
+    else if c3Bear_ent
+        signalShort := true
+        criterion := "C3"
+        entry := c3EntBullFvgMid
+        signalConfirmTf := tfEntry
+
+if not signalLong and not signalShort and c4Bull
+    signalLong := true
+    criterion := "C4"
+    entry := c4BullEntry
+    signalConfirmTf := tfEntry
+if not signalLong and not signalShort and c4Bear
+    signalShort := true
+    criterion := "C4"
+    entry := c4BearEntry
+    signalConfirmTf := tfEntry
+
+// SL: Structure = beyond last swing on Bias TF (HTF); HTF POI = legacy zone floor/ceiling + pad
+float htfPad = not na(htfATR) and htfATR > 0 ? htfATR * slAtrPad : syminfo.mintick * 5.0
+float tickBuf = syminfo.mintick * 10.0
+bool useStructSl = slMode == "Structure (swing + pad)"
+
+if signalLong
+    if useStructSl
+        float padC = not na(htfATR) and htfATR > 0 and slStructPadMult > 0 ? htfATR * slStructPadMult : tickBuf
+        if not na(sl_plHtf) and not na(entry) and sl_plHtf < entry
+            sl := sl_plHtf - padC
+        else
+            sl := poiBot - htfPad
+    else
+        sl := poiBot - htfPad
+    if not na(entry) and sl >= entry
+        sl := poiBot - htfPad * 2.0
+    if not na(entry) and sl >= entry
+        sl := poiBot - htfPad * 3.0
+    if not na(entry) and sl >= entry
+        sl := entry - tickBuf
+
+if signalShort
+    if useStructSl
+        float padCs = not na(htfATR) and htfATR > 0 and slStructPadMult > 0 ? htfATR * slStructPadMult : tickBuf
+        if not na(sl_phHtf) and not na(entry) and sl_phHtf > entry
+            sl := sl_phHtf + padCs
+        else
+            sl := poiTop + htfPad
+    else
+        sl := poiTop + htfPad
+    if not na(entry) and sl <= entry
+        sl := poiTop + htfPad * 2.0
+    if not na(entry) and sl <= entry
+        sl := poiTop + htfPad * 3.0
+    if not na(entry) and sl <= entry
+        sl := entry + tickBuf
+
+risk = signalLong and not na(entry) and not na(sl) ? entry - sl : signalShort and not na(entry) and not na(sl) ? sl - entry : na
+
+if signalLong and not na(risk) and risk > 0
+    tp1 := entry + risk
+    tp2 := na(htfSwingHigh) or htfSwingHigh <= entry ? entry + 2.0 * risk : math.min(entry + 3.0 * risk, math.max(entry + 2.0 * risk, htfSwingHigh))
+    tp3 := entry + 5.0 * risk
+    tp := tp1
+    rr := 1.0
+else if signalShort and not na(risk) and risk > 0
+    tp1 := entry - risk
+    tp2 := na(htfSwingLow) or htfSwingLow >= entry ? entry - 2.0 * risk : math.max(entry - 3.0 * risk, math.min(entry - 2.0 * risk, htfSwingLow))
+    tp3 := entry - 5.0 * risk
+    tp := tp1
+    rr := 1.0
+else
+    tp := na
+    tp1 := na
+    tp2 := na
+    tp3 := na
+    rr := na
+
+validSignal = (signalLong or signalShort) and not na(entry) and not na(sl) and not na(tp1) and not na(tp2) and not na(tp3) and not na(risk) and risk > 0 and entryTfTrendOk
+
+// Short display name for labels / alerts (e.g. "1H CHOCH + OB", "15m IFVG")
+criterionDisplay = validSignal ? f_criterionDisplay(criterion, signalConfirmTf) : ""
+
+// Full one-liner for alerts/chart: "Limit order: …" vs "… Now" for C1-C3
+entryInstruction = validSignal ? f_entryInstruction(criterion, criterionDisplay, signalLong, entry) : ""
+entryMode = validSignal ? (f_isLimitOrder(criterion) ? "limit" : "confirm") : ""
+
+// First bar of a new signal only (avoids duplicate lines/labels if condition persists)
+signalNew = validSignal and not validSignal[1]
+
+// -------------------------------------------------------------------------------------------------
+// Display: entry + SL + TP1–TP3 as horizontal segments with labels; vertical connector at line end (xR)
+// -------------------------------------------------------------------------------------------------
+plotshape(signalNew and signalLong, title = "Long marker", style = shape.triangleup, color = color.new(color.teal, 0), location = location.belowbar, size = size.tiny)
+plotshape(signalNew and signalShort, title = "Short marker", style = shape.triangledown, color = color.new(color.orange, 0), location = location.abovebar, size = size.tiny)
+
+if signalNew
+    int xR = bar_index + entryLineBars
+    string riskTip = "SL: " + str.tostring(sl, format.mintick) + "\nTP1: " + str.tostring(tp1, format.mintick) + " (1R)\nTP2: " + str.tostring(tp2, format.mintick) + " (2–3R vs HTF)\nTP3: " + str.tostring(tp3, format.mintick) + " (5R)\nRisk: " + str.tostring(risk, format.mintick)
+    float pLo = entry
+    float pHi = entry
+    if showSlOnChart
+        pLo := math.min(pLo, sl)
+        pHi := math.max(pHi, sl)
+    if showTpOnChart
+        pLo := math.min(pLo, tp1, tp2, tp3)
+        pHi := math.max(pHi, tp1, tp2, tp3)
+    line.new(bar_index, entry, xR, entry, xloc = xloc.bar_index, color = color.new(color.blue, 0), width = 2, style = line.style_solid)
+    label.new(xR, entry, text = entryInstruction, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = color.new(signalLong ? color.teal : color.orange, 20), textcolor = color.white, size = size.small, tooltip = showRiskInEntryTooltip ? riskTip : na)
+    if showSlOnChart
+        line.new(bar_index, sl, xR, sl, xloc = xloc.bar_index, color = color.new(color.red, 0), width = 2, style = line.style_solid)
+        label.new(xR, sl, text = "SL " + str.tostring(sl, format.mintick), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = color.new(color.red, slTpLabelTransp), textcolor = color.white, size = size.small)
+    if showTpOnChart
+        line.new(bar_index, tp1, xR, tp1, xloc = xloc.bar_index, color = color.new(color.green, 0), width = 2, style = line.style_solid)
+        label.new(xR, tp1, text = "TP1 " + str.tostring(tp1, format.mintick) + " (1R)", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = color.new(color.green, slTpLabelTransp), textcolor = color.white, size = size.small)
+        line.new(bar_index, tp2, xR, tp2, xloc = xloc.bar_index, color = color.new(color.lime, 0), width = 2, style = line.style_solid)
+        label.new(xR, tp2, text = "TP2 " + str.tostring(tp2, format.mintick) + " (2–3R vs HTF)", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = color.new(color.lime, slTpLabelTransp), textcolor = color.white, size = size.small)
+        line.new(bar_index, tp3, xR, tp3, xloc = xloc.bar_index, color = color.new(color.teal, 0), width = 2, style = line.style_solid)
+        label.new(xR, tp3, text = "TP3 " + str.tostring(tp3, format.mintick) + " (5R)", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = color.new(color.teal, slTpLabelTransp), textcolor = color.white, size = size.small)
+    // Vertical connector at xR from lowest to highest *visible* level (drawn last so it stays visible on crossings)
+    if showRiskConnector and pHi != pLo
+        line.new(xR, pHi, xR, pLo, xloc = xloc.bar_index, color = color.new(color.blue, 0), width = 1, style = line.style_dotted)
+
+if validSignal and showDebug
+    string roomDbg = "\nPOI→HTF liq: " + (na(poiToHtfLiqRoom) ? "n/a" : str.tostring(poiToHtfLiqRoom, format.mintick)) + (na(minPoiLiqRoomPx) ? "" : " (min " + str.tostring(minPoiLiqRoomPx, format.mintick) + ")")
+    string adxDbg = "\nEntry TF ADX: " + (na(entryTfAdx) ? "n/a" : str.tostring(entryTfAdx, "#.##")) + (minAdxEntryTf <= 0.0 ? " (filter off)" : " (min " + str.tostring(minAdxEntryTf, "#.##") + ")")
+    string srDbg = "\nHTF S&R POI: " + (not useHtfSrPoi ? "off" : htfSrOk ? (externalBias == 1 ? "Support " : "Resistance ") + str.tostring(htfSrPoiBot, format.mintick) + " – " + str.tostring(htfSrPoiTop, format.mintick) : "n/a")
+    label.new(bar_index, high, "Bias: " + (externalBias == 1 ? "BULL" : externalBias == -1 ? "BEAR" : "NONE") + "\nConfirm TF: " + signalConfirmTf + "\nSL: " + slMode + "\nR: " + str.tostring(risk, format.mintick) + "\nTP1 RR: 1R  TP2: HTF clamp 2–3R  TP3: 5R" + roomDbg + adxDbg + srDbg, style = label.style_label_left, textcolor = color.white, color = color.new(color.black, 70))
+
+// -------------------------------------------------------------------------------------------------
+// Alerts (JSON payload)
+// -------------------------------------------------------------------------------------------------
+// alertcondition() requires const strings, so we keep static conditions and emit dynamic JSON via alert().
+alertcondition(validSignal and signalLong, "SMC Bullish Signal", "SMC bullish setup detected")
+alertcondition(validSignal and signalShort, "SMC Bearish Signal", "SMC bearish setup detected")
+
+// instruction + entryMode first so webhook / log reads intent immediately (limit vs confirm now)
+// asset = short instrument (e.g. EURUSD); tickerId = full TV id (e.g. OANDA:EURUSD); symbol kept for older parsers
+jsonPayload = "{\"instruction\":\"" + entryInstruction + "\",\"entryMode\":\"" + entryMode + "\",\"criteria\":\"" + criterionDisplay + "\",\"criterionCode\":\"" + criterion + "\",\"bias\":\"" + (signalLong ? "LONG" : signalShort ? "SHORT" : "NONE") + "\",\"asset\":\"" + syminfo.ticker + "\",\"tickerId\":\"" + syminfo.tickerid + "\",\"entry\":" + str.tostring(entry) + ",\"sl\":" + str.tostring(sl) + ",\"tp\":" + str.tostring(tp) + ",\"tp1\":" + str.tostring(tp1) + ",\"tp2\":" + str.tostring(tp2) + ",\"tp3\":" + str.tostring(tp3) + ",\"risk\":" + str.tostring(risk) + ",\"rr\":" + str.tostring(rr) + ",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + timeframe.period + "\",\"confirmTf\":\"" + signalConfirmTf + "\",\"slPlacement\":\"" + slMode + "\",\"timestamp\":" + str.tostring(time) + "}"
+if validSignal
+    alert(jsonPayload, alert.freq_once_per_bar_close)

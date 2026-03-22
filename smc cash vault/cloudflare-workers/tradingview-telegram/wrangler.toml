@@ -1,0 +1,9 @@
+# Cloudflare Worker — TradingView webhook → Telegram
+# After `wrangler login`, run: wrangler deploy
+# Set secrets: wrangler secret put TELEGRAM_BOT_TOKEN
+#               wrangler secret put TELEGRAM_CHAT_ID
+#               wrangler secret put WEBHOOK_SECRET
+
+name = "tradingview-telegram"
+main = "src/index.js"
+compatibility_date = "2024-11-01"

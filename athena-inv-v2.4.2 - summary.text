@@ -1,9 +1,0 @@
-Revision notes
----------------
-
-2026-03-18: Athena v2.4.2 - very good entries / revision summary
-- Enforced Equilibrium (premium/discount) filter at the POI level so POIs are only considered on the correct side of the 50% midpoint for the external 4H bias.
-- Improved unmitigated POI labeling: labels now show POI origin timeframe (4H vs 1H) and whether the zone is a breaker.
-- 4H structure/bias handling was fixed so it properly supports and enables the intended 1H confirmation entries (inversion/iFVG model) in the direction of the external trend.
-- Result: more accurate entries with fewer bad signals / minimal losing streak behavior.
-

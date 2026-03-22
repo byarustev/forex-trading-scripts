@@ -1,0 +1,4 @@
+1. fix SL calculations for internal moves. 
+2. fix poi selection for situations where POI appears so close to the temp high or low.
+3. NB. Might need to think about using support and resistance signals in my signals. 
+The resistance and support signals seem to be clear, I just need to ensure that they align with my directional bias

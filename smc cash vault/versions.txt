@@ -1,0 +1,34 @@
+V1.3 (stable: smc cash vault/stable-versions/cash-vault-signals-v1.3.pine)
+
+HTF demand / supply POI (LuxAlgo smart-money-concepts storeOrdeBlock logic)
+- Zone is the extreme parsed candle on the slice from swing pivot bar through structure-break bar (not a fixed lookback from the break).
+- Inputs: wide-bar wick swap optional (default 0 = raw OHLC, better on FX); break tolerance in × HTF ATR; fallback lookback and max slice capped for Pine.
+
+FX-oriented defaults
+- POI→liquidity filter off by default; lower min distance when enabled; iFVG proximity default slightly wider.
+
+HTF support / resistance POI (LuxAlgo support-resistance-signals MTF)
+- Pivot-based bands: resistance above pivot high, support below pivot low; thickness from (range/highest)×0.17×margin.
+- Long bias unions latest HTF support band into POI; short bias unions latest HTF resistance band.
+
+Debug
+- Optional label includes merged HTF S&R band when enabled.
+
+Source of truth for ongoing edits: cash-vault-signals-v1.2 copy.pine (working copy); publish from stable v1.3 when satisfied.
+
+---
+
+V1.1
+
+1. uses athena's ifvg - not yet perfect
+Find a way of mapping it out clearly
+2. 5m signals are good. 
+Only that ones at move start are given before a sweep. 
+-- might need to ion that out (similar to smc divergence thing).
+
+At continuation POIs this ussually doesn't happen
+
+Please not at times price will appear like it has left you but 
+these singals are designed to make you enter when the market is ready.
+Avoid FOMO
+3. 

@@ -1,0 +1,75 @@
+================================================================================
+  SMC Blueprint Signals — Release notes (v1.2)
+  Source: cash-vault-signals-v1.2 - revisionpine (save as .pine for TradingView)
+  Baseline for comparison: cash-vault-signals-v1.1.pine
+================================================================================
+
+OVERVIEW
+--------
+v1.2 keeps the full v1.1 feature set (HTF bias, POI, C1–C4, SL/TP, alerts) and
+adds quality filters plus a refined HTF bias map. The goal is fewer marginal
+setups: POIs jammed against HTF liquidity (no room for targets) and signals
+firing while the entry timeframe is chopping.
+
+
+WHAT’S NEW VS v1.1
+------------------
+
+1) HTF bias map (Bias TF) — refined
+   - v1.1: bias from simple close vs last HTF swing high / swing low (with
+     f_safe fallbacks), latched with previous bias when inside structure.
+   - v1.2: explicit CHOCH-style transitions (bear→bull / bull→bear) with a
+     minimum displacement past the swing (0.2 × HTF ATR), then continuation
+     breaks; bias still persists when price is between swings. This aligns
+     directional bias more closely with a structured SMC narrative than a single
+     close-vs-pivot test.
+
+2) POI → HTF liquidity room (new filter, gates setup context)
+   - Inputs (POI / Proximity):
+     • “Require min room: HTF POI → HTF liquidity” (default on)
+     • “Min POI→liquidity distance (× HTF ATR)” (default 1.0; 0 disables the
+       numeric rule when combined with the toggle / requirement logic)
+   - Meaning:
+     • Long: vertical space from POI top up to HTF swing high (weak high).
+     • Short: vertical space from POI bottom down to HTF swing low (weak low).
+   - If that runway is smaller than the configured multiple of Bias TF ATR,
+     setupContextOk fails — no C1–C4 for that bar. Reduces “stuffed” POIs where
+     TP2 (HTF clamp) has little or no realistic room.
+
+3) Range / chop filter on Entry Context TF (new filter, gates final signal)
+   - New group: “Range filter (entry TF)”.
+   - ADX from ta.dmi on tfEntry (via request.security), compared to “Min ADX”.
+   - Default Min ADX: 14 (loose). Set to 0 to disable entirely. Higher values
+     (e.g. 18–22) are stricter and block more low-trend-strength conditions.
+   - validSignal now also requires entryTfTrendOk (ADX gate), so markers,
+     alertconditions, and JSON alerts only fire when this passes.
+
+4) Debug labels (when “Show Debug Labels” is on)
+   - v1.2 adds optional lines for POI→HTF liquidity distance (and min) and
+     Entry TF ADX (and min), alongside the existing bias / confirm / risk text.
+
+
+UNCHANGED FROM v1.1 (SUMMARY)
+-----------------------------
+• Entry criteria priority (C1 > C2 > C3 > C4; fast: 5m > 15m > entry TF).
+• Athena-style entry-TF iFVG history for C3; fast TFs use classic IFVG crosses.
+• SL modes (structure vs HTF POI box), TP1–TP3 construction, chart drawings,
+  JSON alert payload shape (same keys as v1.1 unless you extend it later).
+
+
+MIGRATION / SETTINGS
+----------------------
+• After upgrading, TradingView may keep old input values. For v1.2 defaults,
+  reset the indicator settings or manually set:
+  - Min POI→liquidity distance × HTF ATR (e.g. 1.0)
+  - Min ADX (e.g. 14, or 0 to turn the ADX gate off)
+
+
+DISCLAIMER
+----------
+Not financial advice. Script behaviour is rule-based; validate all signals
+against your own process and risk rules.
+
+================================================================================
+  End of release-v1.2.txt
+================================================================================
