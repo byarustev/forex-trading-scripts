@@ -2,3 +2,57 @@
 2. fix poi selection for situations where POI appears so close to the temp high or low.
 3. NB. Might need to think about using support and resistance signals in my signals. 
 The resistance and support signals seem to be clear, I just need to ensure that they align with my directional bias
+4. Might need to factor in Liquidity sweep concepts and Higher timeframe limitations (i.e Daily / Weekly Gaps + OB)
+5. Breakout and retest in the directional bias. !!! they seem to be spot on
+6. Once the core building blocks are done. publish the frontend but it should have a payment wall
+7. Support and Resitance Signals. 
+(Can we take trades from established support areas during an up move)
+
+Bullish move
+i.e Swing Low(Higher low). Support. 
+Bullish breakout, 
+Re-test of support zone, Entry 
+Test of support zone, Entry
+
+Also Factor in the Order block detector,
+Once bias is established we could take advantage of 
+continuation moves off the HTF order blocks
+that are left behind during moves, 
+i.e not necesarily waiting for swing OBs
+
+8. Document the note on how price moves
+
+9. fix script failure to detect swing orderblocks. (here is where the very optimal entries are)
+
+
+Fix now. 
+1. Fix the telegram alerts so that each signal is evaluated. 
+2. for each signal given see if the Buy is given near a demand zone, or sell near a supply zone. and take it with minimal entry target 1:2
+
+Note: My indicator seems to be giving enough signals on 1H. And they are close enough.
+
+2. consider creating a version that aims at taking trades from 1H Strong Zone. 
+and evaluate the performance.
+
+3. consider evaluating forex milkers swing strategy. 
+
+
+
+Steps. 
+When ever there is a an External CHOCH - Bias, 
+Identify unmitigated demand or supply zones left behind. 
+these zones need to be within the 50% zone for them to be considered. 
+ie Bullish Bias look out for unmitigated demand zones with in the discount zone. 
+and Bearish Bias look out for unmitigated supply zones with in the premium zone. 
+
+NB. Strong zones i.e Swing demand or supply zones are the most powerful zones. 
+
+
+================================================================================
+Future additions — Swing POI Entry Marker (v1.2 improve)  [todo 1]
+================================================================================
+1. Keep fine-tuning continuation entries.
+2. Introduce other entry models (e.g. breaker blocks).
+3. Continuation moves where we have candle + impulse even if the candle before the impulse is not the opposite colour (relax strict opposite-candle requirement for displacement legs).
+4. Filter legacy entry POIs: prefer order blocks that led to the structure change; de-prioritise or filter “middle” OBs that are often inducement before a sweep and the main move.
+5. introduce the IFVG entry model on reversals

@@ -1,0 +1,1550 @@
+//@version=5
+indicator("Swing POI Entry Marker", "Swing POI Entries", overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 200)
+
+// -------------------------------------------------------------------------------------------------
+// Constants
+// -------------------------------------------------------------------------------------------------
+BULLISH_LEG = 1
+BEARISH_LEG = 0
+BULLISH = 1
+BEARISH = -1
+FLIP_STATE_NORMAL = 0
+FLIP_STATE_WARNING = 1
+// Loosened for trial: shallow pullbacks (low MIN) and deep legs vs slow HTF pivots (high MAX).
+MIN_TARGET_DISTANCE_ATR = 0.35
+MAX_TARGET_DISTANCE_ATR = 12.0
+MIN_TREND_EFFICIENCY = 0.35
+STRUCTURE_POI_REENTRY_BARS = 24
+MAX_PRESTRUCTURE_POI_RANK = 2
+HTF_STRONG_REACT_ATR = 0.45
+HTF_STRONG_LEVEL_TOUCHES_TO_VIOLATE = 3
+HTF_SWING_LEVEL_RESET_ATR = 0.15
+
+// -------------------------------------------------------------------------------------------------
+// Inputs
+// -------------------------------------------------------------------------------------------------
+groupSwing = "Swing Bias (Lux-style)"
+swingsLengthInput = input.int(50, "Swing Length", minval = 10, group = groupSwing)
+requireSwingBosForChartBias = input.bool(true, "Commit chart bias only on swing BOS (CHoCH needs BOS)", group = groupSwing, tooltip = "When on, a swing CHoCH alone does not update committed direction or structure events; only a continuation swing break (BOS) does. HTF external bias logic is unchanged.")
+showStrongWeakInput = input.bool(true, "Show Strong/Weak Labels", group = groupSwing)
+
+groupPOI = "Strong POI Arming"
+nearAtrMult = input.float(0.35, "Near POI Distance (ATR Mult)", minval = 0.05, step = 0.05, group = groupPOI)
+atrLen = input.int(14, "ATR Length", minval = 1, group = groupPOI)
+
+groupEntry = "Entry Logic"
+contextTf = input.timeframe("240", "Context TF (HTF)", group = groupEntry)
+use5mEntry = input.bool(true, "Use 5m Entry Criteria", group = groupEntry)
+use15mEntry = input.bool(true, "Use 15m Entry Criteria", group = groupEntry)
+useAutoEntryTfMap = input.bool(true, "Auto map entry TF by chart TF", group = groupEntry)
+entryConfirmFor4hChart = input.string("5m", "4H chart: entry confirm TF", options=["5m", "15m", "1H"], group = groupEntry, tooltip = "With auto map on a 4H chart: choose which TF drives CHOCH/OB/C1/retest/ADX. Default 5m = fastest confirmations; 15m / 1H = fewer, higher-TF signals.")
+useImpulseObFvgPoi = input.bool(true, "Add Impulsive OB+FVG POIs", group = groupEntry)
+useContinuationTrigger = input.bool(true, "Allow Continuation Trigger At POI", group = groupEntry)
+useSweepFvgContinuation = input.bool(true, "Continuation: include liquidity sweep FVG taps", group = groupEntry)
+continuationNowSignal = input.bool(true, "Continuation: trigger NOW signal immediately", group = groupEntry)
+require5mObRetestAfterChoch = input.bool(true, "LTF entries: require OB retest after CHOCH (active confirm TF)", group = groupEntry)
+useExternalConfirmPoi = input.bool(true, "Add external-confirmation POIs (origin candle + impulse)", group = groupEntry)
+externalPoiLookback = input.int(30, "External-confirmation origin lookback", minval = 5, maxval = 100, group = groupEntry)
+useFirstBiasFlipPoi = input.bool(true, "Bias flip: add first origin POI (extreme candle + impulse)", group = groupEntry)
+firstBiasPoiLookback = input.int(50, "Bias flip origin lookback", minval = 5, maxval = 150, group = groupEntry)
+requireDirectionalDisplacementForPoi = input.bool(true, "POIs: require directional displacement", group = groupEntry)
+usePremiumDiscountAutoEval = input.bool(true, "Auto-evaluate trades at Premium/Discount zones", group = groupEntry)
+useCashVaultHtfPoi = input.bool(true, "Add Cash-Vault HTF POIs (OB+FVG)", group = groupEntry)
+cashVaultProxAtrMult = input.float(1.2, "Cash-Vault POI proximity ATR", minval = 0.2, step = 0.1, group = groupEntry)
+useCashVaultSwingObPoi = input.bool(true, "Cash-Vault: merge HTF swing OB", group = groupEntry)
+cashVaultExtLen = input.int(4, "Cash-Vault external pivot length", minval = 2, group = groupEntry)
+cashVaultSweepLookback = input.int(20, "LTF golden-zone sweep lookback", minval = 5, maxval = 100, group = groupEntry)
+cashVaultSwingObLookback = input.int(50, "Cash-Vault swing OB lookback", minval = 10, maxval = 200, group = groupEntry)
+cashVaultSwingObAtrLen = input.int(200, "Cash-Vault swing OB ATR len", minval = 14, maxval = 500, group = groupEntry)
+useLargeDirectionalFvgPoi = input.bool(true, "Add large directional FVGs as POIs", group = groupEntry)
+largeFvgMinAtr = input.float(0.8, "Large FVG min size (ATR)", minval = 0.1, step = 0.1, group = groupEntry)
+useExpansionInefficiencyContext = input.bool(true, "Expansion leg: evaluate on discount/premium inefficiencies", group = groupEntry)
+externalFlipAtrBuffer = input.float(0.05, "External bias flip buffer (ATR)", minval = 0.0, step = 0.01, group = groupEntry)
+useAccumulationFilter = input.bool(true, "Filter accumulation markets", group = groupEntry)
+minAdxForTrades = input.float(18.0, "Min ADX (entry TF)", minval = 0.0, maxval = 60.0, step = 1.0, group = groupEntry)
+useConsolidationFilter = input.bool(true, "Filter consolidation markets", group = groupEntry)
+consolidationLookback = input.int(20, "Consolidation lookback", minval = 5, maxval = 200, group = groupEntry)
+consolidationRangeAtrMult = input.float(1.8, "Consolidation max range (ATR)", minval = 0.5, step = 0.1, group = groupEntry)
+adxDiLen = input.int(14, "ADX DI length", minval = 2, maxval = 50, group = groupEntry)
+adxSmooth = input.int(14, "ADX smoothing", minval = 1, maxval = 50, group = groupEntry)
+internalLength = input.int(5, "Internal Pivot Length", minval = 2, group = groupEntry)
+bodyImpulseMult = input.float(1.5, "Displacement Body Mult", minval = 1.0, step = 0.1, group = groupEntry)
+bodyAvgLen = input.int(10, "Body Average Length", minval = 5, group = groupEntry)
+originLookback = input.int(10, "Origin Candle Lookback", minval = 2, maxval = 50, group = groupEntry)
+useEntryTfValueRelax = input.bool(true, "Entry TF value + HTF POI tap (continuation)", group = groupEntry, tooltip = "If chart sits outside HTF discount/premium, still allow setups when entry TF is in discount/premium vs its swing range and the merged HTF Cash-Vault POI is overlapped on that timeframe. Does not change external bias or flip-warning rules.")
+entryValueTf = input.timeframe("60", "Entry TF (value relaxation)", group = groupEntry)
+requireHtfChochBarRefBos = input.bool(true, "HTF: BOS = close past CHoCH bar extreme", group = groupEntry, tooltip = "When on, external bias only flips to the opposite side after context-TF close breaks beyond the CHoCH candle high/low (true swing BOS). CHoCH alone only enters warning; it does not arm opposite-direction trades.")
+minRR = input.float(3.0, "Min RR", minval = 1.0, step = 0.25, group = groupEntry)
+
+groupVisual = "Visuals"
+showZones = input.bool(true, "Show Active Entry Zones", group = groupVisual)
+showDebug = input.bool(false, "Show Debug Plots", group = groupVisual)
+poiLineBars = input.int(8, "POI Short Line Length (bars)", minval = 2, maxval = 40, group = groupVisual)
+limitLineBars = input.int(5, "Limit Price Line Length (bars)", minval = 2, maxval = 20, group = groupVisual)
+nowLineBars = input.int(10, "NOW Entry Line Length (bars)", minval = 3, maxval = 50, group = groupVisual)
+
+// -------------------------------------------------------------------------------------------------
+// Data structures
+// -------------------------------------------------------------------------------------------------
+type pivot
+    float currentLevel
+    float lastLevel
+    bool crossed
+    int barTime
+    int barIndex
+
+type trend
+    int bias
+
+type trailingExtremes
+    float top
+    float bottom
+    int lastTopTime
+    int lastBottomTime
+    int barIndex
+    int barTime
+
+// -------------------------------------------------------------------------------------------------
+// State
+// -------------------------------------------------------------------------------------------------
+var pivot swingHigh = pivot.new(na, na, false, na, na)
+var pivot swingLow = pivot.new(na, na, false, na, na)
+var pivot internalHigh = pivot.new(na, na, false, na, na)
+var pivot internalLow = pivot.new(na, na, false, na, na)
+
+var trend swingTrend = trend.new(0)
+var trend internalTrend = trend.new(0)
+// Direction used when HTF bias is unset: updates on swing BOS only if requireSwingBosForChartBias (CHoCH alone does not flip).
+var int committedSwingDir = 0
+var int externalBias = 0
+var int parentExternalBias = 0
+var int candidateExternalBias = 0
+var int externalFlipState = FLIP_STATE_NORMAL
+// HTF CHoCH bar extremes: BOS confirmation closes beyond these (context TF), not only vs pivoted swing level.
+var float htfChochReferenceLow = na
+var float htfChochReferenceHigh = na
+var int lastStructureEventBar = na
+var float htfTrackedSwingLow = na
+var int htfSwingLowTapCount = 0
+var bool htfLowBandInside = false
+var float htfTrackedSwingHigh = na
+var int htfSwingHighTapCount = 0
+var bool htfHighBandInside = false
+var float protectedLow = na
+var float protectedHigh = na
+var int marketPhase = 0  // 0 = external trend, 1 = pullback, 2 = entry window
+var int pendingExternalFlipDir = 0  // waits for CHOCH -> BOS confirmation
+
+var trailingExtremes trailing = trailingExtremes.new(na, na, na, na, na, na)
+
+// Pending zone state
+var bool zoneActive = false
+var int zoneDir = 0
+var float zoneLow = na
+var float zoneHigh = na
+var float zoneEntryMid = na
+var int zoneBornBar = na
+var bool zoneUsed = false
+var int zoneTouchCount = 0
+var bool zoneWasInside = false
+var box activeZoneBox = na
+var bool limitBullSignal = false
+var bool limitBearSignal = false
+var bool nowBullSignal = false
+var bool nowBearSignal = false
+var string nowSignalSuffix = ""
+var float lastBullSignalPoiKey = na
+var float lastBearSignalPoiKey = na
+var line strongHighLine = na
+var line strongLowLine = na
+var label strongHighLabel = na
+var label strongLowLabel = na
+var bool bullPoiTouched = false
+var bool bearPoiTouched = false
+var int bullPoiTouchedBar = na
+var int bearPoiTouchedBar = na
+var float demandPoiTop = na
+var float demandPoiBot = na
+var int demandPoiBar = na
+var float supplyPoiTop = na
+var float supplyPoiBot = na
+var int supplyPoiBar = na
+var int lastDemandPoiMarkedBar = na
+var int lastSupplyPoiMarkedBar = na
+var array<float> demandZoneTops = array.new_float()
+var array<float> demandZoneBots = array.new_float()
+var array<int> demandZoneBars = array.new_int()
+var array<int> demandZoneTouches = array.new_int()
+var array<bool> demandZoneInside = array.new_bool()
+var array<float> demandZoneParentEq = array.new_float()
+var array<float> supplyZoneTops = array.new_float()
+var array<float> supplyZoneBots = array.new_float()
+var array<int> supplyZoneBars = array.new_int()
+var array<int> supplyZoneTouches = array.new_int()
+var array<bool> supplyZoneInside = array.new_bool()
+var array<float> supplyZoneParentEq = array.new_float()
+var int lastImpulseDemandPoiBar = na
+var int lastImpulseSupplyPoiBar = na
+var int lastExtBullPoiBar = na
+var int lastExtBearPoiBar = na
+var int lastFirstBiasBullPoiBar = na
+var int lastFirstBiasBearPoiBar = na
+var int lastLargeFvgBullPoiBar = na
+var int lastLargeFvgBearPoiBar = na
+var array<float> bullSweepFvgTops = array.new_float()
+var array<float> bullSweepFvgBots = array.new_float()
+var array<int> bullSweepFvgTouches = array.new_int()
+var array<bool> bullSweepFvgInside = array.new_bool()
+var array<float> bearSweepFvgTops = array.new_float()
+var array<float> bearSweepFvgBots = array.new_float()
+var array<int> bearSweepFvgTouches = array.new_int()
+var array<bool> bearSweepFvgInside = array.new_bool()
+var array<float> bullExpansionFvgTops = array.new_float()
+var array<float> bullExpansionFvgBots = array.new_float()
+var array<int> bullExpansionFvgTouches = array.new_int()
+var array<bool> bullExpansionFvgInside = array.new_bool()
+var array<float> bearExpansionFvgTops = array.new_float()
+var array<float> bearExpansionFvgBots = array.new_float()
+var array<int> bearExpansionFvgTouches = array.new_int()
+var array<bool> bearExpansionFvgInside = array.new_bool()
+var float lastCvBullPoiTop = na
+var float lastCvBullPoiBot = na
+var float lastCvBearPoiTop = na
+var float lastCvBearPoiBot = na
+
+// -------------------------------------------------------------------------------------------------
+// Helper functions (Lux-style leg/swing detection)
+// -------------------------------------------------------------------------------------------------
+leg(int size) =>
+    var int legValue = 0
+    newLegHigh = high[size] > ta.highest(size)
+    newLegLow = low[size] < ta.lowest(size)
+    if newLegHigh
+        legValue := BEARISH_LEG
+    else if newLegLow
+        legValue := BULLISH_LEG
+    legValue
+
+startOfNewLeg(int currentLeg) =>
+    ta.change(currentLeg) != 0
+
+startOfBearishLeg(int currentLeg) =>
+    ta.change(currentLeg) == -1
+
+startOfBullishLeg(int currentLeg) =>
+    ta.change(currentLeg) == 1
+
+updatePivot(pivot p, float level, int t, int idx) =>
+    p.lastLevel := p.currentLevel
+    p.currentLevel := level
+    p.crossed := false
+    p.barTime := t
+    p.barIndex := idx
+
+getCurrentStructure(int size, bool internal) =>
+    currentLeg = leg(size)
+    newPivot = startOfNewLeg(currentLeg)
+    pivotLow = startOfBullishLeg(currentLeg)
+    bool newDemandPoi = false
+    bool newSupplyPoi = false
+    float outDemandTop = na
+    float outDemandBot = na
+    int outDemandBar = na
+    float outSupplyTop = na
+    float outSupplyBot = na
+    int outSupplyBar = na
+    if newPivot
+        if pivotLow
+            if internal
+                updatePivot(internalLow, low[size], time[size], bar_index[size])
+            else
+                updatePivot(swingLow, low[size], time[size], bar_index[size])
+                trailing.bottom := swingLow.currentLevel
+                trailing.lastBottomTime := swingLow.barTime
+                trailing.barIndex := swingLow.barIndex
+                trailing.barTime := swingLow.barTime
+                newDemandPoi := true
+                outDemandTop := high[size]
+                outDemandBot := low[size]
+                outDemandBar := bar_index[size]
+        else
+            if internal
+                updatePivot(internalHigh, high[size], time[size], bar_index[size])
+            else
+                updatePivot(swingHigh, high[size], time[size], bar_index[size])
+                trailing.top := swingHigh.currentLevel
+                trailing.lastTopTime := swingHigh.barTime
+                trailing.barIndex := swingHigh.barIndex
+                trailing.barTime := swingHigh.barTime
+                newSupplyPoi := true
+                outSupplyTop := high[size]
+                outSupplyBot := low[size]
+                outSupplyBar := bar_index[size]
+    [newDemandPoi, outDemandTop, outDemandBot, outDemandBar, newSupplyPoi, outSupplyTop, outSupplyBot, outSupplyBar]
+
+displayStructure(bool internal) =>
+    pivot highPivot = internal ? internalHigh : swingHigh
+    pivot lowPivot = internal ? internalLow : swingLow
+    trend t = internal ? internalTrend : swingTrend
+
+    bool bullBreak = ta.crossover(close, highPivot.currentLevel) and not highPivot.crossed and not na(highPivot.currentLevel)
+    bool bearBreak = ta.crossunder(close, lowPivot.currentLevel) and not lowPivot.crossed and not na(lowPivot.currentLevel)
+
+    bool bullishCHoCH = false
+    bool bearishCHoCH = false
+
+    if bullBreak
+        bullishCHoCH := t.bias == BEARISH
+        highPivot.crossed := true
+        t.bias := BULLISH
+
+    if bearBreak
+        bearishCHoCH := t.bias == BULLISH
+        lowPivot.crossed := true
+        t.bias := BEARISH
+
+    [bullishCHoCH, bearishCHoCH, bullBreak, bearBreak]
+
+// LTF entry criteria (used through request.security):
+// CHOCH proxy = close crossing latest pivot high/low on entry timeframe.
+f_entryCriteriaTf(int pivLen, int bodyLen, float impulseMult) =>
+    lastHigh = ta.valuewhen(not na(ta.pivothigh(high, pivLen, pivLen)), ta.pivothigh(high, pivLen, pivLen), 0)
+    lastLow = ta.valuewhen(not na(ta.pivotlow(low, pivLen, pivLen)), ta.pivotlow(low, pivLen, pivLen), 0)
+    bullChoch = ta.crossover(close, lastHigh)
+    bearChoch = ta.crossunder(close, lastLow)
+    bodyNow = math.abs(close - open)
+    bodyMean = ta.sma(bodyNow, bodyLen)
+    bullFvgLocal = low > high[2]
+    bearFvgLocal = high < low[2]
+    bullDisp = bodyNow > bodyMean * impulseMult and close > open and bullFvgLocal
+    bearDisp = bodyNow > bodyMean * impulseMult and close < open and bearFvgLocal
+    [bullChoch, bearChoch, bullDisp, bearDisp]
+
+// Entry TF: local discount/premium vs last pivots (Cash Vault v1.3 entry-context style; used via request.security).
+f_entryTfValueTuple(int extLen) =>
+    lh = ta.valuewhen(not na(ta.pivothigh(high, extLen, extLen)), ta.pivothigh(high, extLen, extLen), 0)
+    ll = ta.valuewhen(not na(ta.pivotlow(low, extLen, extLen)), ta.pivotlow(low, extLen, extLen), 0)
+    [close, high, low, lh, ll]
+
+// LTF context for MSS + golden zone (Cash Vault v1.3 C1 style; used via request.security).
+f_confirmTuple(int extLen, int sweepLb) =>
+    lastHigh = ta.valuewhen(not na(ta.pivothigh(high, extLen, extLen)), ta.pivothigh(high, extLen, extLen), 0)
+    lastLow = ta.valuewhen(not na(ta.pivotlow(low, extLen, extLen)), ta.pivotlow(low, extLen, extLen), 0)
+    [close, high, low, ta.atr(14), lastHigh, lastLow, ta.lowest(low, 10), ta.highest(high, 10), ta.lowest(low, sweepLb)[1], ta.highest(high, sweepLb)[1]]
+
+f_mid(float a, float b) =>
+    (a + b) * 0.5
+
+f_inRange(float x, float lo, float hi) =>
+    not na(x) and x >= math.min(lo, hi) and x <= math.max(lo, hi)
+
+f_adxValue() =>
+    [_, _, adxV] = ta.dmi(adxDiLen, adxSmooth)
+    adxV
+
+// Cash-vault style HTF OB/FVG POI pack.
+f_cvObFvgPack() =>
+    bullObTop = ta.valuewhen(close[1] < open[1] and close > high[1], high[1], 0)
+    bullObBot = ta.valuewhen(close[1] < open[1] and close > high[1], low[1], 0)
+    bearObTop = ta.valuewhen(close[1] > open[1] and close < low[1], high[1], 0)
+    bearObBot = ta.valuewhen(close[1] > open[1] and close < low[1], low[1], 0)
+    bullFvgTop = ta.valuewhen(low > high[2], low, 0)
+    bullFvgBot = ta.valuewhen(low > high[2], high[2], 0)
+    bearFvgTop = ta.valuewhen(high < low[2], low[2], 0)
+    bearFvgBot = ta.valuewhen(high < low[2], high, 0)
+    [bullObTop, bullObBot, bearObTop, bearObBot, bullFvgTop, bullFvgBot, bearFvgTop, bearFvgBot]
+
+// Cash-vault style HTF swing OB (Lux-like parsed range scan).
+f_cvSwingObPoi(int extLen, int lookbackBars, int atrLen) =>
+    float atrM = ta.atr(atrLen)
+    bool highVol = not na(atrM) and atrM > 0 and (high - low) >= 2.0 * atrM
+    float parsedHigh = highVol ? low : high
+    float parsedLow = highVol ? high : low
+    float ph = ta.pivothigh(high, extLen, extLen)
+    float pl = ta.pivotlow(low, extLen, extLen)
+    float lastSwingHigh = ta.valuewhen(not na(ph), ph, 0)
+    float lastSwingLow = ta.valuewhen(not na(pl), pl, 0)
+    bool bullBreak = not na(lastSwingHigh) and ta.crossover(close, lastSwingHigh)
+    bool bearBreak = not na(lastSwingLow) and ta.crossunder(close, lastSwingLow)
+    float bufBullTop = na
+    float bufBullBot = na
+    if bullBreak
+        float minL = parsedLow[0]
+        float t = parsedHigh[0]
+        int k = math.min(lookbackBars, 200)
+        for i = 0 to k - 1
+            if parsedLow[i] < minL
+                minL := parsedLow[i]
+                t := parsedHigh[i]
+        bufBullTop := t
+        bufBullBot := minL
+    float bufBearTop = na
+    float bufBearBot = na
+    if bearBreak
+        float maxH = parsedHigh[0]
+        float b = parsedLow[0]
+        int k2 = math.min(lookbackBars, 200)
+        for i = 0 to k2 - 1
+            if parsedHigh[i] > maxH
+                maxH := parsedHigh[i]
+                b := parsedLow[i]
+        bufBearTop := maxH
+        bufBearBot := b
+    float lastBullObTop = ta.valuewhen(bullBreak, bufBullTop, 0)
+    float lastBullObBot = ta.valuewhen(bullBreak, bufBullBot, 0)
+    float lastBearObTop = ta.valuewhen(bearBreak, bufBearTop, 0)
+    float lastBearObBot = ta.valuewhen(bearBreak, bufBearBot, 0)
+    [lastBullObTop, lastBullObBot, lastBearObTop, lastBearObBot]
+
+// First POI on fresh external bias flip:
+// origin opposite candle that precedes the break impulse.
+f_firstBiasFlipOriginPoi(int extLen, int lookbackBars, bool requireDir) =>
+    float ph = ta.pivothigh(high, extLen, extLen)
+    float pl = ta.pivotlow(low, extLen, extLen)
+    float lastSwingHigh = ta.valuewhen(not na(ph), ph, 0)
+    float lastSwingLow = ta.valuewhen(not na(pl), pl, 0)
+    bool bullBreak = not na(lastSwingHigh) and ta.crossover(close, lastSwingHigh)
+    bool bearBreak = not na(lastSwingLow) and ta.crossunder(close, lastSwingLow)
+    bool bullDispDir = close > open and low > high[2]
+    bool bearDispDir = close < open and high < low[2]
+    float bullTop = na
+    float bullBot = na
+    float bearTop = na
+    float bearBot = na
+    if bullBreak and (not requireDir or bullDispDir)
+        int idx = na
+        int k = math.min(lookbackBars, 200)
+        for i = 1 to k
+            if na(idx) and close[i] < open[i]
+                idx := i
+        if not na(idx)
+            bullTop := open[idx]
+            bullBot := low[idx]
+    if bearBreak and (not requireDir or bearDispDir)
+        int idx = na
+        int k = math.min(lookbackBars, 200)
+        for i = 1 to k
+            if na(idx) and close[i] > open[i]
+                idx := i
+        if not na(idx)
+            bearTop := high[idx]
+            bearBot := open[idx]
+    [bullBreak, bearBreak, bullTop, bullBot, bearTop, bearBot]
+
+// -------------------------------------------------------------------------------------------------
+// Core calculations
+// -------------------------------------------------------------------------------------------------
+atr = ta.atr(atrLen)
+body = math.abs(close - open)
+bodyAvg = ta.sma(body, bodyAvgLen)
+
+// Keep trailing extremes live between swing updates.
+if na(trailing.top)
+    trailing.top := high
+if na(trailing.bottom)
+    trailing.bottom := low
+trailing.top := math.max(trailing.top, high)
+trailing.bottom := math.min(trailing.bottom, low)
+trailing.lastTopTime := trailing.top == high ? time : trailing.lastTopTime
+trailing.lastBottomTime := trailing.bottom == low ? time : trailing.lastBottomTime
+
+// Build swing and internal structures.
+[newDemandPoi, outDemandTop, outDemandBot, outDemandBar, newSupplyPoi, outSupplyTop, outSupplyBot, outSupplyBar] = getCurrentStructure(swingsLengthInput, false)
+[internalNewDemandPoi, internalOutDemandTop, internalOutDemandBot, internalOutDemandBar, internalNewSupplyPoi, internalOutSupplyTop, internalOutSupplyBot, internalOutSupplyBar] = getCurrentStructure(internalLength, true)
+parentEqSnapshot = not na(trailing.top) and not na(trailing.bottom) ? math.avg(trailing.top, trailing.bottom) : na
+
+if newDemandPoi
+    demandPoiTop := outDemandTop
+    demandPoiBot := outDemandBot
+    demandPoiBar := outDemandBar
+    bullPoiTouched := false
+    bullPoiTouchedBar := na
+    array.push(demandZoneTops, outDemandTop)
+    array.push(demandZoneBots, outDemandBot)
+    array.push(demandZoneBars, outDemandBar)
+    array.push(demandZoneTouches, 0)
+    array.push(demandZoneInside, false)
+    array.push(demandZoneParentEq, parentEqSnapshot)
+    if array.size(demandZoneTops) > 200
+        array.shift(demandZoneTops)
+        array.shift(demandZoneBots)
+        array.shift(demandZoneBars)
+        array.shift(demandZoneTouches)
+        array.shift(demandZoneInside)
+        array.shift(demandZoneParentEq)
+
+if newSupplyPoi
+    supplyPoiTop := outSupplyTop
+    supplyPoiBot := outSupplyBot
+    supplyPoiBar := outSupplyBar
+    bearPoiTouched := false
+    bearPoiTouchedBar := na
+    array.push(supplyZoneTops, outSupplyTop)
+    array.push(supplyZoneBots, outSupplyBot)
+    array.push(supplyZoneBars, outSupplyBar)
+    array.push(supplyZoneTouches, 0)
+    array.push(supplyZoneInside, false)
+    array.push(supplyZoneParentEq, parentEqSnapshot)
+    if array.size(supplyZoneTops) > 200
+        array.shift(supplyZoneTops)
+        array.shift(supplyZoneBots)
+        array.shift(supplyZoneBars)
+        array.shift(supplyZoneTouches)
+        array.shift(supplyZoneInside)
+        array.shift(supplyZoneParentEq)
+
+[swingBullCHoCH, swingBearCHoCH, swingBullBreak, swingBearBreak] = displayStructure(false)
+[internalBullCHoCH, internalBearCHoCH, _, _] = displayStructure(true)
+// BOS = break in trend direction; CHoCH = first break against prior trend (Lux-style).
+swingBullBOS = swingBullBreak and not swingBullCHoCH
+swingBearBOS = swingBearBreak and not swingBearCHoCH
+if requireSwingBosForChartBias
+    if swingBullBOS
+        committedSwingDir := BULLISH
+    else if swingBearBOS
+        committedSwingDir := BEARISH
+
+[ltf5BullChoch, ltf5BearChoch, ltf5BullDisp, ltf5BearDisp] = request.security(syminfo.tickerid, "5", f_entryCriteriaTf(internalLength, bodyAvgLen, bodyImpulseMult), lookahead = barmerge.lookahead_off)
+[ltf15BullChoch, ltf15BearChoch, ltf15BullDisp, ltf15BearDisp] = request.security(syminfo.tickerid, "15", f_entryCriteriaTf(internalLength, bodyAvgLen, bodyImpulseMult), lookahead = barmerge.lookahead_off)
+[ltf60BullChoch, ltf60BearChoch, ltf60BullDisp, ltf60BearDisp] = request.security(syminfo.tickerid, "60", f_entryCriteriaTf(internalLength, bodyAvgLen, bodyImpulseMult), lookahead = barmerge.lookahead_off)
+[f5Close, f5High, f5Low, f5Atr, f5SwingHigh, f5SwingLow, f5ImpLow, f5ImpHigh, f5SweepLow, f5SweepHigh] = request.security(syminfo.tickerid, "5", f_confirmTuple(cashVaultExtLen, cashVaultSweepLookback), lookahead = barmerge.lookahead_off)
+[f15Close, f15High, f15Low, f15Atr, f15SwingHigh, f15SwingLow, f15ImpLow, f15ImpHigh, f15SweepLow, f15SweepHigh] = request.security(syminfo.tickerid, "15", f_confirmTuple(cashVaultExtLen, cashVaultSweepLookback), lookahead = barmerge.lookahead_off)
+[f60Close, f60High, f60Low, f60Atr, f60SwingHigh, f60SwingLow, f60ImpLow, f60ImpHigh, f60SweepLow, f60SweepHigh] = request.security(syminfo.tickerid, "60", f_confirmTuple(cashVaultExtLen, cashVaultSweepLookback), lookahead = barmerge.lookahead_off)
+[f5BullObTop, f5BullObBot, f5BearObTop, f5BearObBot, _, _, _, _] = request.security(syminfo.tickerid, "5", f_cvObFvgPack(), lookahead = barmerge.lookahead_off)
+[f15BullObTop, f15BullObBot, f15BearObTop, f15BearObBot, _, _, _, _] = request.security(syminfo.tickerid, "15", f_cvObFvgPack(), lookahead = barmerge.lookahead_off)
+[f60BullObTop, f60BullObBot, f60BearObTop, f60BearObBot, _, _, _, _] = request.security(syminfo.tickerid, "60", f_cvObFvgPack(), lookahead = barmerge.lookahead_off)
+[adx5] = request.security(syminfo.tickerid, "5", [f_adxValue()], lookahead = barmerge.lookahead_off)
+[adx15] = request.security(syminfo.tickerid, "15", [f_adxValue()], lookahead = barmerge.lookahead_off)
+[adx60] = request.security(syminfo.tickerid, "60", [f_adxValue()], lookahead = barmerge.lookahead_off)
+
+chartSec = timeframe.in_seconds()
+sec1h = timeframe.in_seconds("60")
+sec4h = timeframe.in_seconds("240")
+is1hChart = chartSec == sec1h
+is4hChart = chartSec == sec4h
+isHigherThan4h = chartSec > sec4h
+
+// Confirmation TF mapping (not current-chart entry confirmation):
+// 4H -> 5m (default), 15m, or 1H; 1H -> 5m; above 4H -> 1H.
+useFiveMinuteConfirm = useAutoEntryTfMap ? (is1hChart or (is4hChart and entryConfirmFor4hChart == "5m")) : (use5mEntry and not use15mEntry)
+useFifteenMinuteConfirm = useAutoEntryTfMap ? (is4hChart and entryConfirmFor4hChart == "15m") : (use15mEntry and not use5mEntry)
+useSixtyMinuteConfirm = useAutoEntryTfMap ? (isHigherThan4h or (is4hChart and entryConfirmFor4hChart == "1H")) : (not use5mEntry and not use15mEntry)
+
+ltfBullChoch = useFiveMinuteConfirm ? ltf5BullChoch : useFifteenMinuteConfirm ? ltf15BullChoch : ltf60BullChoch
+ltfBearChoch = useFiveMinuteConfirm ? ltf5BearChoch : useFifteenMinuteConfirm ? ltf15BearChoch : ltf60BearChoch
+ltfBullDisp = useFiveMinuteConfirm ? ltf5BullDisp : useFifteenMinuteConfirm ? ltf15BullDisp : ltf60BullDisp
+ltfBearDisp = useFiveMinuteConfirm ? ltf5BearDisp : useFifteenMinuteConfirm ? ltf15BearDisp : ltf60BearDisp
+entryAdx = useFiveMinuteConfirm ? adx5 : useFifteenMinuteConfirm ? adx15 : adx60
+
+// LTF golden zone + C1-style limit (OB mid vs 0.618–0.786) per confirm TF.
+bullGzHi_5 = f5Close - (f5Close - f5ImpLow) * 0.618
+bullGzLo_5 = f5Close - (f5Close - f5ImpLow) * 0.786
+bearGzLo_5 = f5Close + (f5ImpHigh - f5Close) * 0.618
+bearGzHi_5 = f5Close + (f5ImpHigh - f5Close) * 0.786
+bullGzHi_15 = f15Close - (f15Close - f15ImpLow) * 0.618
+bullGzLo_15 = f15Close - (f15Close - f15ImpLow) * 0.786
+bearGzLo_15 = f15Close + (f15ImpHigh - f15Close) * 0.618
+bearGzHi_15 = f15Close + (f15ImpHigh - f15Close) * 0.786
+bullGzHi_60 = f60Close - (f60Close - f60ImpLow) * 0.618
+bullGzLo_60 = f60Close - (f60Close - f60ImpLow) * 0.786
+bearGzLo_60 = f60Close + (f60ImpHigh - f60Close) * 0.618
+bearGzHi_60 = f60Close + (f60ImpHigh - f60Close) * 0.786
+obMidBull5 = f_mid(f5BullObTop, f5BullObBot)
+obMidBear5 = f_mid(f5BearObTop, f5BearObBot)
+obMidBull15 = f_mid(f15BullObTop, f15BullObBot)
+obMidBear15 = f_mid(f15BearObTop, f15BearObBot)
+obMidBull60 = f_mid(f60BullObTop, f60BullObBot)
+obMidBear60 = f_mid(f60BearObTop, f60BearObBot)
+c1BullEntry_5 = not na(f5BullObTop) and not na(f5BullObBot) and f5BullObTop > f5BullObBot ? (f_inRange(obMidBull5, bullGzLo_5, bullGzHi_5) ? obMidBull5 : f_mid(bullGzLo_5, bullGzHi_5)) : na
+c1BearEntry_5 = not na(f5BearObTop) and not na(f5BearObBot) and f5BearObTop > f5BearObBot ? (f_inRange(obMidBear5, bearGzLo_5, bearGzHi_5) ? obMidBear5 : f_mid(bearGzLo_5, bearGzHi_5)) : na
+c1BullEntry_15 = not na(f15BullObTop) and not na(f15BullObBot) and f15BullObTop > f15BullObBot ? (f_inRange(obMidBull15, bullGzLo_15, bullGzHi_15) ? obMidBull15 : f_mid(bullGzLo_15, bullGzHi_15)) : na
+c1BearEntry_15 = not na(f15BearObTop) and not na(f15BearObBot) and f15BearObTop > f15BearObBot ? (f_inRange(obMidBear15, bearGzLo_15, bearGzHi_15) ? obMidBear15 : f_mid(bearGzLo_15, bearGzHi_15)) : na
+c1BullEntry_60 = not na(f60BullObTop) and not na(f60BullObBot) and f60BullObTop > f60BullObBot ? (f_inRange(obMidBull60, bullGzLo_60, bullGzHi_60) ? obMidBull60 : f_mid(bullGzLo_60, bullGzHi_60)) : na
+c1BearEntry_60 = not na(f60BearObTop) and not na(f60BearObBot) and f60BearObTop > f60BearObBot ? (f_inRange(obMidBear60, bearGzLo_60, bearGzHi_60) ? obMidBear60 : f_mid(bearGzLo_60, bearGzHi_60)) : na
+ltfBullObTop = useFiveMinuteConfirm ? f5BullObTop : useFifteenMinuteConfirm ? f15BullObTop : f60BullObTop
+ltfBullObBot = useFiveMinuteConfirm ? f5BullObBot : useFifteenMinuteConfirm ? f15BullObBot : f60BullObBot
+ltfBearObTop = useFiveMinuteConfirm ? f5BearObTop : useFifteenMinuteConfirm ? f15BearObTop : f60BearObTop
+ltfBearObBot = useFiveMinuteConfirm ? f5BearObBot : useFifteenMinuteConfirm ? f15BearObBot : f60BearObBot
+ltfC1BullEntry = useFiveMinuteConfirm ? c1BullEntry_5 : useFifteenMinuteConfirm ? c1BullEntry_15 : c1BullEntry_60
+ltfC1BearEntry = useFiveMinuteConfirm ? c1BearEntry_5 : useFifteenMinuteConfirm ? c1BearEntry_15 : c1BearEntry_60
+ltfBullObPackOk = not na(ltfBullObTop) and not na(ltfBullObBot) and ltfBullObTop > ltfBullObBot
+ltfBearObPackOk = not na(ltfBearObTop) and not na(ltfBearObBot) and ltfBearObTop > ltfBearObBot
+ltfC1BullEntryOk = ltfBullObPackOk and not na(ltfC1BullEntry)
+ltfC1BearEntryOk = ltfBearObPackOk and not na(ltfC1BearEntry)
+
+marketNotAccumulating = not useAccumulationFilter or minAdxForTrades <= 0 or (not na(entryAdx) and entryAdx >= minAdxForTrades)
+rangeWindow = ta.highest(high, consolidationLookback) - ta.lowest(low, consolidationLookback)
+hasConsolidationHistory = not na(close[consolidationLookback])
+trendEfficiency = hasConsolidationHistory and rangeWindow > 0 ? math.abs(close - close[consolidationLookback]) / rangeWindow : 1.0
+narrowRangeConsolidation = not na(atr) and atr > 0 and rangeWindow <= atr * consolidationRangeAtrMult
+lowEfficiencyConsolidation = hasConsolidationHistory and trendEfficiency < MIN_TREND_EFFICIENCY
+isConsolidating = useConsolidationFilter and (narrowRangeConsolidation or lowEfficiencyConsolidation)
+marketTradeAllowed = marketNotAccumulating and not isConsolidating
+bull5mObRetest = not na(f5BullObTop) and not na(f5BullObBot) and low <= f5BullObTop and high >= f5BullObBot
+bear5mObRetest = not na(f5BearObTop) and not na(f5BearObBot) and high >= f5BearObBot and low <= f5BearObTop
+bull15mObRetest = not na(f15BullObTop) and not na(f15BullObBot) and low <= f15BullObTop and high >= f15BullObBot
+bear15mObRetest = not na(f15BearObTop) and not na(f15BearObBot) and high >= f15BearObBot and low <= f15BearObTop
+bull60mObRetest = not na(f60BullObTop) and not na(f60BullObBot) and low <= f60BullObTop and high >= f60BullObBot
+bear60mObRetest = not na(f60BearObTop) and not na(f60BearObBot) and high >= f60BearObBot and low <= f60BearObTop
+bullLtfObRetest = useFiveMinuteConfirm ? bull5mObRetest : useFifteenMinuteConfirm ? bull15mObRetest : bull60mObRetest
+bearLtfObRetest = useFiveMinuteConfirm ? bear5mObRetest : useFifteenMinuteConfirm ? bear15mObRetest : bear60mObRetest
+passLtfObRetestGateBull = not require5mObRetestAfterChoch or bullLtfObRetest
+passLtfObRetestGateBear = not require5mObRetestAfterChoch or bearLtfObRetest
+// External structure is computed from context TF (e.g., 4H) so external trades are aligned.
+htfClose = request.security(syminfo.tickerid, contextTf, close, lookahead = barmerge.lookahead_off)
+htfOpen = request.security(syminfo.tickerid, contextTf, open, lookahead = barmerge.lookahead_off)
+htfHigh = request.security(syminfo.tickerid, contextTf, high, lookahead = barmerge.lookahead_off)
+htfLow = request.security(syminfo.tickerid, contextTf, low, lookahead = barmerge.lookahead_off)
+htfHigh2 = request.security(syminfo.tickerid, contextTf, high[2], lookahead = barmerge.lookahead_off)
+htfLow2 = request.security(syminfo.tickerid, contextTf, low[2], lookahead = barmerge.lookahead_off)
+htfSwingHigh = request.security(syminfo.tickerid, contextTf, ta.valuewhen(not na(ta.pivothigh(high, swingsLengthInput, swingsLengthInput)), ta.pivothigh(high, swingsLengthInput, swingsLengthInput), 0), lookahead = barmerge.lookahead_off)
+htfSwingLow = request.security(syminfo.tickerid, contextTf, ta.valuewhen(not na(ta.pivotlow(low, swingsLengthInput, swingsLengthInput)), ta.pivotlow(low, swingsLengthInput, swingsLengthInput), 0), lookahead = barmerge.lookahead_off)
+htfAtr = request.security(syminfo.tickerid, contextTf, ta.atr(14), lookahead = barmerge.lookahead_off)
+htfBodyAvg = request.security(syminfo.tickerid, contextTf, ta.sma(math.abs(close - open), bodyAvgLen), lookahead = barmerge.lookahead_off)
+[cvBullObTop, cvBullObBot, cvBearObTop, cvBearObBot, cvBullFvgTop, cvBullFvgBot, cvBearFvgTop, cvBearFvgBot] = request.security(syminfo.tickerid, contextTf, f_cvObFvgPack(), lookahead = barmerge.lookahead_off)
+[cvSwBullTop, cvSwBullBot, cvSwBearTop, cvSwBearBot] = request.security(syminfo.tickerid, contextTf, f_cvSwingObPoi(cashVaultExtLen, cashVaultSwingObLookback, cashVaultSwingObAtrLen), lookahead = barmerge.lookahead_off)
+[biasFlipBullBreak, biasFlipBearBreak, biasFlipBullTop, biasFlipBullBot, biasFlipBearTop, biasFlipBearBot] = request.security(syminfo.tickerid, contextTf, f_firstBiasFlipOriginPoi(cashVaultExtLen, firstBiasPoiLookback, requireDirectionalDisplacementForPoi), lookahead = barmerge.lookahead_off)
+
+bullBreakLevel = not na(htfSwingHigh) and not na(htfAtr) ? htfSwingHigh + htfAtr * externalFlipAtrBuffer : htfSwingHigh
+bearBreakLevel = not na(htfSwingLow) and not na(htfAtr) ? htfSwingLow - htfAtr * externalFlipAtrBuffer : htfSwingLow
+bullBreakExt = ta.crossover(htfClose, bullBreakLevel)
+bearBreakExt = ta.crossunder(htfClose, bearBreakLevel)
+structureEventSwing = requireSwingBosForChartBias ? (swingBullBOS or swingBearBOS) : (swingBullCHoCH or swingBearCHoCH or swingBullBreak or swingBearBreak)
+structureEventNow = structureEventSwing or bullBreakExt or bearBreakExt
+if structureEventNow
+    lastStructureEventBar := bar_index
+recentStructureWindow = not na(lastStructureEventBar) and (bar_index - lastStructureEventBar) <= STRUCTURE_POI_REENTRY_BARS
+prevExternalBias = nz(externalBias[1], 0)
+prevParentBias = nz(parentExternalBias[1], prevExternalBias)
+prevCandidateBias = nz(candidateExternalBias[1], 0)
+prevFlipState = nz(externalFlipState[1], FLIP_STATE_NORMAL)
+
+// External flip handling:
+// CHOCH enters warning mode; BOS/acceptance confirms the new external bias.
+externalBias := prevExternalBias
+parentExternalBias := prevParentBias
+candidateExternalBias := prevCandidateBias
+externalFlipState := prevFlipState
+
+if prevExternalBias == 0
+    initBiasFromChart = not requireSwingBosForChartBias ? nz(swingTrend.bias, 0) : nz(committedSwingDir, 0) != 0 ? committedSwingDir : (swingBullCHoCH or swingBearCHoCH ? nz(committedSwingDir[1], 0) : nz(swingTrend.bias, 0))
+    initBias = bullBreakExt ? BULLISH : bearBreakExt ? BEARISH : initBiasFromChart
+    externalBias := initBias
+    parentExternalBias := initBias
+    candidateExternalBias := 0
+    externalFlipState := FLIP_STATE_NORMAL
+else
+    if prevFlipState == FLIP_STATE_NORMAL
+        if prevExternalBias == BULLISH and bearBreakExt
+            externalFlipState := FLIP_STATE_WARNING
+            candidateExternalBias := BEARISH
+            // Low of the CHoCH bar: bearish BOS requires a later close below this (4H swing handoff).
+            htfChochReferenceLow := htfLow
+        else if prevExternalBias == BEARISH and bullBreakExt
+            externalFlipState := FLIP_STATE_WARNING
+            candidateExternalBias := BULLISH
+            htfChochReferenceHigh := htfHigh
+    else
+        bullBosConfirmLegacy = prevCandidateBias == BULLISH and not na(bullBreakLevel) and htfClose > bullBreakLevel
+        bearBosConfirmLegacy = prevCandidateBias == BEARISH and not na(bearBreakLevel) and htfClose < bearBreakLevel
+        bullBosConfirmRef = prevCandidateBias == BULLISH and not na(htfChochReferenceHigh) and htfClose > htfChochReferenceHigh
+        bearBosConfirmRef = prevCandidateBias == BEARISH and not na(htfChochReferenceLow) and htfClose < htfChochReferenceLow
+        bullBosConfirm = requireHtfChochBarRefBos ? bullBosConfirmRef : bullBosConfirmLegacy
+        bearBosConfirm = requireHtfChochBarRefBos ? bearBosConfirmRef : bearBosConfirmLegacy
+        warningInvalidated = (prevCandidateBias == BULLISH and bearBreakExt) or (prevCandidateBias == BEARISH and bullBreakExt)
+        if bullBosConfirm
+            externalBias := BULLISH
+            candidateExternalBias := 0
+            externalFlipState := FLIP_STATE_NORMAL
+            htfChochReferenceLow := na
+            htfChochReferenceHigh := na
+        else if bearBosConfirm
+            externalBias := BEARISH
+            candidateExternalBias := 0
+            externalFlipState := FLIP_STATE_NORMAL
+            htfChochReferenceLow := na
+            htfChochReferenceHigh := na
+        else if warningInvalidated
+            candidateExternalBias := 0
+            externalFlipState := FLIP_STATE_NORMAL
+            htfChochReferenceLow := na
+            htfChochReferenceHigh := na
+
+if externalBias != prevExternalBias
+    bullPoiTouched := false
+    bearPoiTouched := false
+    bullPoiTouchedBar := na
+    bearPoiTouchedBar := na
+    marketPhase := 0
+    // Clear opposite stale active setup when macro bias changes.
+    zoneActive := false
+    zoneUsed := false
+    zoneTouchCount := 0
+    zoneWasInside := false
+    flipParentEq = not na(trailing.top) and not na(trailing.bottom) ? math.avg(trailing.top, trailing.bottom) : na
+
+    // First POI on fresh external bias: origin extreme candle of the break leg.
+    if useFirstBiasFlipPoi and externalBias == BULLISH and biasFlipBullBreak and not na(biasFlipBullTop) and not na(biasFlipBullBot) and biasFlipBullTop > biasFlipBullBot and lastFirstBiasBullPoiBar != bar_index
+        array.push(demandZoneTops, biasFlipBullTop)
+        array.push(demandZoneBots, biasFlipBullBot)
+        array.push(demandZoneBars, bar_index)
+        array.push(demandZoneTouches, 0)
+        array.push(demandZoneInside, false)
+        array.push(demandZoneParentEq, flipParentEq)
+        if array.size(demandZoneTops) > 200
+            array.shift(demandZoneTops)
+            array.shift(demandZoneBots)
+            array.shift(demandZoneBars)
+            array.shift(demandZoneTouches)
+            array.shift(demandZoneInside)
+            array.shift(demandZoneParentEq)
+        lastFirstBiasBullPoiBar := bar_index
+
+    if useFirstBiasFlipPoi and externalBias == BEARISH and biasFlipBearBreak and not na(biasFlipBearTop) and not na(biasFlipBearBot) and biasFlipBearTop > biasFlipBearBot and lastFirstBiasBearPoiBar != bar_index
+        array.push(supplyZoneTops, biasFlipBearTop)
+        array.push(supplyZoneBots, biasFlipBearBot)
+        array.push(supplyZoneBars, bar_index)
+        array.push(supplyZoneTouches, 0)
+        array.push(supplyZoneInside, false)
+        array.push(supplyZoneParentEq, flipParentEq)
+        if array.size(supplyZoneTops) > 200
+            array.shift(supplyZoneTops)
+            array.shift(supplyZoneBots)
+            array.shift(supplyZoneBars)
+            array.shift(supplyZoneTouches)
+            array.shift(supplyZoneInside)
+            array.shift(supplyZoneParentEq)
+        lastFirstBiasBearPoiBar := bar_index
+
+// External-confirmation POI:
+// On external bias confirmation with impulse, store origin candle as POI.
+if useExternalConfirmPoi
+    extBody = math.abs(htfClose - htfOpen)
+    extBodyAvg = htfBodyAvg
+    extParentEq = not na(trailing.top) and not na(trailing.bottom) ? math.avg(trailing.top, trailing.bottom) : na
+    extBullDispDir = htfClose > htfOpen and htfLow > htfHigh2
+    extBearDispDir = htfClose < htfOpen and htfHigh < htfLow2
+    extImpulseBull = bullBreakExt and not na(extBodyAvg) and extBody > extBodyAvg * bodyImpulseMult and (not requireDirectionalDisplacementForPoi or extBullDispDir)
+    extImpulseBear = bearBreakExt and not na(extBodyAvg) and extBody > extBodyAvg * bodyImpulseMult and (not requireDirectionalDisplacementForPoi or extBearDispDir)
+
+    if externalBias == BULLISH and extImpulseBull and lastExtBullPoiBar != bar_index
+        int extIdx = na
+        for i = 1 to externalPoiLookback
+            if na(extIdx) and close[i] < open[i]
+                extIdx := i
+        if not na(extIdx)
+            extTop = open[extIdx]
+            extBot = low[extIdx]
+            if extTop > extBot
+                array.push(demandZoneTops, extTop)
+                array.push(demandZoneBots, extBot)
+                array.push(demandZoneBars, bar_index)
+                array.push(demandZoneTouches, 0)
+                array.push(demandZoneInside, false)
+                array.push(demandZoneParentEq, extParentEq)
+                if array.size(demandZoneTops) > 200
+                    array.shift(demandZoneTops)
+                    array.shift(demandZoneBots)
+                    array.shift(demandZoneBars)
+                    array.shift(demandZoneTouches)
+                    array.shift(demandZoneInside)
+                    array.shift(demandZoneParentEq)
+                lastExtBullPoiBar := bar_index
+
+    if externalBias == BEARISH and extImpulseBear and lastExtBearPoiBar != bar_index
+        int extIdx = na
+        for i = 1 to externalPoiLookback
+            if na(extIdx) and close[i] > open[i]
+                extIdx := i
+        if not na(extIdx)
+            extTop = high[extIdx]
+            extBot = open[extIdx]
+            if extTop > extBot
+                array.push(supplyZoneTops, extTop)
+                array.push(supplyZoneBots, extBot)
+                array.push(supplyZoneBars, bar_index)
+                array.push(supplyZoneTouches, 0)
+                array.push(supplyZoneInside, false)
+                array.push(supplyZoneParentEq, extParentEq)
+                if array.size(supplyZoneTops) > 200
+                    array.shift(supplyZoneTops)
+                    array.shift(supplyZoneBots)
+                    array.shift(supplyZoneBars)
+                    array.shift(supplyZoneTouches)
+                    array.shift(supplyZoneInside)
+                    array.shift(supplyZoneParentEq)
+                lastExtBearPoiBar := bar_index
+
+// Context dealing range from HTF swings.
+rangeValid = not na(htfSwingHigh) and not na(htfSwingLow) and htfSwingHigh > htfSwingLow
+eq = rangeValid ? math.avg(htfSwingHigh, htfSwingLow) : na
+inDiscount = rangeValid and close <= eq
+inPremium = rangeValid and close >= eq
+bool bullPdZoneContext = false
+bool bearPdZoneContext = false
+premiumTop = rangeValid ? htfSwingHigh : na
+premiumBot = rangeValid ? (0.95 * htfSwingHigh + 0.05 * htfSwingLow) : na
+discountTop = rangeValid ? (0.95 * htfSwingLow + 0.05 * htfSwingHigh) : na
+discountBot = rangeValid ? htfSwingLow : na
+bullPdZoneContext := usePremiumDiscountAutoEval and externalBias == BULLISH and rangeValid and high >= discountBot and low <= discountTop
+bullPdZoneContext := bullPdZoneContext or (usePremiumDiscountAutoEval and externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BULLISH and rangeValid and high >= discountBot and low <= discountTop)
+bearPdZoneContext := usePremiumDiscountAutoEval and externalBias == BEARISH and rangeValid and high >= premiumBot and low <= premiumTop
+bearPdZoneContext := bearPdZoneContext or (usePremiumDiscountAutoEval and externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BEARISH and rangeValid and high >= premiumBot and low <= premiumTop)
+
+// Expansion-leg inefficiencies (FVGs) to arm evaluation when revisited in value.
+if useExpansionInefficiencyContext
+    bullExpFvgNow = (externalBias == BULLISH or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BULLISH)) and low > high[2]
+    if bullExpFvgNow
+        array.push(bullExpansionFvgTops, low)
+        array.push(bullExpansionFvgBots, high[2])
+        array.push(bullExpansionFvgTouches, 0)
+        array.push(bullExpansionFvgInside, false)
+        if array.size(bullExpansionFvgTops) > 300
+            array.shift(bullExpansionFvgTops)
+            array.shift(bullExpansionFvgBots)
+            array.shift(bullExpansionFvgTouches)
+            array.shift(bullExpansionFvgInside)
+
+    bearExpFvgNow = (externalBias == BEARISH or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BEARISH)) and high < low[2]
+    if bearExpFvgNow
+        array.push(bearExpansionFvgTops, low[2])
+        array.push(bearExpansionFvgBots, high)
+        array.push(bearExpansionFvgTouches, 0)
+        array.push(bearExpansionFvgInside, false)
+        if array.size(bearExpansionFvgTops) > 300
+            array.shift(bearExpansionFvgTops)
+            array.shift(bearExpansionFvgBots)
+            array.shift(bearExpansionFvgTouches)
+            array.shift(bearExpansionFvgInside)
+
+// Strong levels from HTF map (dealing-range extremes — always defined when range valid).
+strongLow = rangeValid ? htfSwingLow : na
+strongHigh = rangeValid ? htfSwingHigh : na
+
+// Distinct taps into HTF swing band; after N taps the level is treated as violated (liquidity taken) — reset when swing repaints.
+if rangeValid and not na(htfSwingLow) and not na(htfSwingHigh) and not na(htfAtr) and htfAtr > 0
+    lowLv = htfSwingLow
+    highLv = htfSwingHigh
+    lowLevelChanged = na(htfTrackedSwingLow) or math.abs(lowLv - htfTrackedSwingLow) > htfAtr * HTF_SWING_LEVEL_RESET_ATR
+    if lowLevelChanged
+        htfSwingLowTapCount := 0
+        htfLowBandInside := false
+    htfTrackedSwingLow := lowLv
+    lowBandTop = lowLv + htfAtr * HTF_STRONG_REACT_ATR
+    lowBandBot = lowLv - htfAtr * 0.35
+    inHtfLowBand = low <= lowBandTop and high >= lowBandBot
+    if inHtfLowBand and not htfLowBandInside
+        htfSwingLowTapCount += 1
+    htfLowBandInside := inHtfLowBand
+
+    highLevelChanged = na(htfTrackedSwingHigh) or math.abs(highLv - htfTrackedSwingHigh) > htfAtr * HTF_SWING_LEVEL_RESET_ATR
+    if highLevelChanged
+        htfSwingHighTapCount := 0
+        htfHighBandInside := false
+    htfTrackedSwingHigh := highLv
+    highBandBot = highLv - htfAtr * HTF_STRONG_REACT_ATR
+    highBandTop = highLv + htfAtr * 0.35
+    inHtfHighBand = high >= highBandBot and low <= highBandTop
+    if inHtfHighBand and not htfHighBandInside
+        htfSwingHighTapCount += 1
+    htfHighBandInside := inHtfHighBand
+else
+    htfTrackedSwingLow := na
+    htfTrackedSwingHigh := na
+    htfSwingLowTapCount := 0
+    htfSwingHighTapCount := 0
+    htfLowBandInside := false
+    htfHighBandInside := false
+
+htfSwingLowViolated = rangeValid and htfSwingLowTapCount >= HTF_STRONG_LEVEL_TOUCHES_TO_VIOLATE
+htfSwingHighViolated = rangeValid and htfSwingHighTapCount >= HTF_STRONG_LEVEL_TOUCHES_TO_VIOLATE
+
+// Tap + reaction at HTF swing low/high (Strong Low / Strong High): counts even when externalBias has not flipped yet — disabled after level is violated by enough taps.
+htfStrongLowTap = rangeValid and not na(htfSwingLow) and not na(htfAtr) and low <= htfSwingLow + htfAtr * HTF_STRONG_REACT_ATR
+htfStrongLowReaction = htfStrongLowTap and close > htfSwingLow and close > open
+htfStrongLowContext = htfStrongLowReaction and (inDiscount or externalBias == BULLISH or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BULLISH)) and not htfSwingLowViolated
+htfStrongHighTap = rangeValid and not na(htfSwingHigh) and not na(htfAtr) and high >= htfSwingHigh - htfAtr * HTF_STRONG_REACT_ATR
+htfStrongHighReaction = htfStrongHighTap and close < htfSwingHigh and close < open
+htfStrongHighContext = htfStrongHighReaction and (inPremium or externalBias == BEARISH or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BEARISH)) and not htfSwingHighViolated
+
+// Additional Cash-Vault HTF POI stream (adds to existing zones, does not replace).
+cvBaseTop = externalBias == BULLISH ? (na(cvBullObTop) ? cvBullFvgTop : cvBullObTop) : (na(cvBearObTop) ? cvBearFvgTop : cvBearObTop)
+cvBaseBot = externalBias == BULLISH ? (na(cvBullObBot) ? cvBullFvgBot : cvBullObBot) : (na(cvBearObBot) ? cvBearFvgBot : cvBearObBot)
+cvSwTop = externalBias == BULLISH ? cvSwBullTop : cvSwBearTop
+cvSwBot = externalBias == BULLISH ? cvSwBullBot : cvSwBearBot
+cvSwingOk = useCashVaultSwingObPoi and not na(cvSwTop) and not na(cvSwBot)
+cvPoiTop = cvSwingOk ? math.max(cvBaseTop, cvSwTop) : cvBaseTop
+cvPoiBot = cvSwingOk ? math.min(cvBaseBot, cvSwBot) : cvBaseBot
+cvPoiMid = not na(cvPoiTop) and not na(cvPoiBot) ? (cvPoiTop + cvPoiBot) * 0.5 : na
+cvPoiTapped = useCashVaultHtfPoi and not na(cvPoiTop) and not na(cvPoiBot) and high >= cvPoiBot and low <= cvPoiTop
+cvPoiNear = useCashVaultHtfPoi and not na(cvPoiMid) and not na(htfAtr) and htfAtr > 0 and math.abs(close - cvPoiMid) <= htfAtr * cashVaultProxAtrMult
+
+// Entry-TF discount/premium + HTF POI overlap (does not alter externalBias / flip handling).
+[entClose, entHigh, entLow, entSwingHigh, entSwingLow] = request.security(syminfo.tickerid, entryValueTf, f_entryTfValueTuple(cashVaultExtLen), lookahead = barmerge.lookahead_off)
+entEq = not na(entSwingHigh) and not na(entSwingLow) and entSwingHigh > entSwingLow ? (entSwingHigh + entSwingLow) * 0.5 : na
+entryTfRangeValid = not na(entEq)
+// Match v1.3: strict inequality at equilibrium.
+entryTfInDiscount = entryTfRangeValid and entClose < entEq
+entryTfInPremium = entryTfRangeValid and entClose > entEq
+cvPoiBoxOk = not na(cvPoiTop) and not na(cvPoiBot) and cvPoiTop > cvPoiBot
+entryTfHtfPoiTapped = cvPoiBoxOk and entHigh >= cvPoiBot and entLow <= cvPoiTop
+entryTfValueRelaxBull = useEntryTfValueRelax and entryTfInDiscount and entryTfHtfPoiTapped
+entryTfValueRelaxBear = useEntryTfValueRelax and entryTfInPremium and entryTfHtfPoiTapped
+bullHtfValueOk = inDiscount or entryTfValueRelaxBull
+bearHtfValueOk = inPremium or entryTfValueRelaxBear
+
+if useCashVaultHtfPoi and externalBias == BULLISH and not na(cvPoiTop) and not na(cvPoiBot) and (cvPoiTop != lastCvBullPoiTop or cvPoiBot != lastCvBullPoiBot)
+    array.push(demandZoneTops, cvPoiTop)
+    array.push(demandZoneBots, cvPoiBot)
+    array.push(demandZoneBars, bar_index)
+    array.push(demandZoneTouches, 0)
+    array.push(demandZoneInside, false)
+    array.push(demandZoneParentEq, eq)
+    if array.size(demandZoneTops) > 200
+        array.shift(demandZoneTops)
+        array.shift(demandZoneBots)
+        array.shift(demandZoneBars)
+        array.shift(demandZoneTouches)
+        array.shift(demandZoneInside)
+        array.shift(demandZoneParentEq)
+    lastCvBullPoiTop := cvPoiTop
+    lastCvBullPoiBot := cvPoiBot
+
+if useCashVaultHtfPoi and externalBias == BEARISH and not na(cvPoiTop) and not na(cvPoiBot) and (cvPoiTop != lastCvBearPoiTop or cvPoiBot != lastCvBearPoiBot)
+    array.push(supplyZoneTops, cvPoiTop)
+    array.push(supplyZoneBots, cvPoiBot)
+    array.push(supplyZoneBars, bar_index)
+    array.push(supplyZoneTouches, 0)
+    array.push(supplyZoneInside, false)
+    array.push(supplyZoneParentEq, eq)
+    if array.size(supplyZoneTops) > 200
+        array.shift(supplyZoneTops)
+        array.shift(supplyZoneBots)
+        array.shift(supplyZoneBars)
+        array.shift(supplyZoneTouches)
+        array.shift(supplyZoneInside)
+        array.shift(supplyZoneParentEq)
+    lastCvBearPoiTop := cvPoiTop
+    lastCvBearPoiBot := cvPoiBot
+
+// Continuation sweep areas:
+// Bullish continuation watches bearish FVGs located below latest higher-low proxy.
+// Bearish continuation watches bullish FVGs located above latest lower-high proxy.
+if useSweepFvgContinuation
+    bearishFvgNow = high < low[2]
+    bearishFvgTop = low[2]
+    bearishFvgBot = high
+    bearishFvgMid = (bearishFvgTop + bearishFvgBot) * 0.5
+
+    bullishFvgNow = low > high[2]
+    bullishFvgTop = low
+    bullishFvgBot = high[2]
+    bullishFvgMid = (bullishFvgTop + bullishFvgBot) * 0.5
+
+    hlProxy = swingLow.currentLevel
+    lhProxy = swingHigh.currentLevel
+
+    if externalBias == BULLISH and bearishFvgNow and not na(hlProxy) and bearishFvgMid <= hlProxy
+        array.push(bullSweepFvgTops, bearishFvgTop)
+        array.push(bullSweepFvgBots, bearishFvgBot)
+        array.push(bullSweepFvgTouches, 0)
+        array.push(bullSweepFvgInside, false)
+        if array.size(bullSweepFvgTops) > 200
+            array.shift(bullSweepFvgTops)
+            array.shift(bullSweepFvgBots)
+            array.shift(bullSweepFvgTouches)
+            array.shift(bullSweepFvgInside)
+
+    if externalBias == BEARISH and bullishFvgNow and not na(lhProxy) and bullishFvgMid >= lhProxy
+        array.push(bearSweepFvgTops, bullishFvgTop)
+        array.push(bearSweepFvgBots, bullishFvgBot)
+        array.push(bearSweepFvgTouches, 0)
+        array.push(bearSweepFvgInside, false)
+        if array.size(bearSweepFvgTops) > 200
+            array.shift(bearSweepFvgTops)
+            array.shift(bearSweepFvgBots)
+            array.shift(bearSweepFvgTouches)
+            array.shift(bearSweepFvgInside)
+poiDemandTop = demandPoiTop
+poiDemandBot = demandPoiBot
+poiSupplyTop = supplyPoiTop
+poiSupplyBot = supplyPoiBot
+
+poiDemandMid = not na(poiDemandTop) and not na(poiDemandBot) ? (poiDemandTop + poiDemandBot) * 0.5 : na
+poiSupplyMid = not na(poiSupplyTop) and not na(poiSupplyBot) ? (poiSupplyTop + poiSupplyBot) * 0.5 : na
+
+// Lux-style "Strong Low/High POI" (last swing demand/supply) — interaction + reaction.
+chartSwingDemandPoiTouch = not na(poiDemandTop) and not na(poiDemandBot) and high >= poiDemandBot and low <= poiDemandTop and close > open and (inDiscount or externalBias == BULLISH or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BULLISH))
+chartSwingSupplyPoiTouch = not na(poiSupplyTop) and not na(poiSupplyBot) and high >= poiSupplyBot and low <= poiSupplyTop and close < open and (inPremium or externalBias == BEARISH or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BEARISH))
+strongLowBullContext = htfStrongLowContext or chartSwingDemandPoiTouch
+strongHighBearContext = htfStrongHighContext or chartSwingSupplyPoiTouch
+
+nearStrongLow = false
+nearStrongHigh = false
+bullPoiTouchNow = false
+bearPoiTouchNow = false
+float matchedDemandMid = na
+float matchedSupplyMid = na
+bool continuationDemandContext = false
+bool continuationSupplyContext = false
+float continuationDemandMid = na
+float continuationSupplyMid = na
+bool bullSweepTapContext = false
+bool bearSweepTapContext = false
+bool hasParentDemandSafeArea = false
+bool hasParentSupplySafeArea = false
+preBullContextAllowed = externalBias == BULLISH or parentExternalBias == BULLISH or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BULLISH)
+preBearContextAllowed = externalBias == BEARISH or parentExternalBias == BEARISH or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BEARISH)
+
+// Evaluate all unmitigated demand zones for bullish context (in discount).
+int matchedDemandIdx = -1
+int dn = array.size(demandZoneTops)
+int preStructureDemandRank = 0
+if dn > 0
+    for i = dn - 1 to 0
+        touchCount = array.get(demandZoneTouches, i)
+        if touchCount < 3
+            zTop = array.get(demandZoneTops, i)
+            zBot = array.get(demandZoneBots, i)
+            zBar = array.get(demandZoneBars, i)
+            zMid = (zTop + zBot) * 0.5
+            zParentEq = array.get(demandZoneParentEq, i)
+            inDiscZone = not na(zParentEq) and zMid <= zParentEq
+            zAge = bar_index - zBar
+            zAgeValid = zAge >= 0 and zAge <= 9998
+            safeAge = math.max(0, math.min(zAge, 9998))
+            safeAge2 = safeAge + 2
+            zBullImpulse = zAgeValid and not na(close[safeAge]) and not na(open[safeAge]) and not na(low[safeAge]) and not na(high[safeAge2]) and close[safeAge] > open[safeAge] and low[safeAge] > high[safeAge2]
+            validDemandPoi = inDiscZone and zBullImpulse
+            zTouch = high >= zBot and low <= zTop
+            zNear = math.abs(close - zMid) <= atr * nearAtrMult
+            wasInside = array.get(demandZoneInside, i)
+            isPreStructurePoi = na(lastStructureEventBar) or zBar <= lastStructureEventBar
+            if recentStructureWindow and validDemandPoi and isPreStructurePoi
+                preStructureDemandRank += 1
+            preferredDemandRank = not recentStructureWindow or (isPreStructurePoi and preStructureDemandRank <= MAX_PRESTRUCTURE_POI_RANK)
+            if validDemandPoi
+                hasParentDemandSafeArea := true
+            // Count fresh touches only when bullish context is valid for this zone.
+            if zTouch and not wasInside and preBullContextAllowed and validDemandPoi
+                array.set(demandZoneTouches, i, touchCount + 1)
+            array.set(demandZoneInside, i, zTouch)
+            if preBullContextAllowed and preferredDemandRank and (zNear or zTouch)
+                continuationDemandContext := true
+                if na(continuationDemandMid)
+                    continuationDemandMid := zMid
+            if preBullContextAllowed and (cvPoiNear or cvPoiTapped)
+                continuationDemandContext := true
+                if na(continuationDemandMid)
+                    continuationDemandMid := cvPoiMid
+            if preBullContextAllowed and preferredDemandRank and validDemandPoi and (zNear or zTouch) and matchedDemandIdx == -1
+                matchedDemandIdx := i
+                nearStrongLow := zNear
+                bullPoiTouchNow := zTouch
+                matchedDemandMid := zMid
+
+// Evaluate all unmitigated supply zones for bearish context (in premium).
+int matchedSupplyIdx = -1
+int sn = array.size(supplyZoneTops)
+int preStructureSupplyRank = 0
+if sn > 0
+    for i = sn - 1 to 0
+        touchCount = array.get(supplyZoneTouches, i)
+        if touchCount < 3
+            zTop = array.get(supplyZoneTops, i)
+            zBot = array.get(supplyZoneBots, i)
+            zBar = array.get(supplyZoneBars, i)
+            zMid = (zTop + zBot) * 0.5
+            zParentEq = array.get(supplyZoneParentEq, i)
+            inPremZone = not na(zParentEq) and zMid >= zParentEq
+            zAge = bar_index - zBar
+            zAgeValid = zAge >= 0 and zAge <= 9998
+            safeAge = math.max(0, math.min(zAge, 9998))
+            safeAge2 = safeAge + 2
+            zBearImpulse = zAgeValid and not na(close[safeAge]) and not na(open[safeAge]) and not na(high[safeAge]) and not na(low[safeAge2]) and close[safeAge] < open[safeAge] and high[safeAge] < low[safeAge2]
+            validSupplyPoi = inPremZone and zBearImpulse
+            zTouch = high >= zBot and low <= zTop
+            zNear = math.abs(close - zMid) <= atr * nearAtrMult
+            wasInside = array.get(supplyZoneInside, i)
+            isPreStructurePoi = na(lastStructureEventBar) or zBar <= lastStructureEventBar
+            if recentStructureWindow and validSupplyPoi and isPreStructurePoi
+                preStructureSupplyRank += 1
+            preferredSupplyRank = not recentStructureWindow or (isPreStructurePoi and preStructureSupplyRank <= MAX_PRESTRUCTURE_POI_RANK)
+            if validSupplyPoi
+                hasParentSupplySafeArea := true
+            // Count fresh touches only when bearish context is valid for this zone.
+            if zTouch and not wasInside and preBearContextAllowed and validSupplyPoi
+                array.set(supplyZoneTouches, i, touchCount + 1)
+            array.set(supplyZoneInside, i, zTouch)
+            if preBearContextAllowed and preferredSupplyRank and (zNear or zTouch)
+                continuationSupplyContext := true
+                if na(continuationSupplyMid)
+                    continuationSupplyMid := zMid
+            if preBearContextAllowed and (cvPoiNear or cvPoiTapped)
+                continuationSupplyContext := true
+                if na(continuationSupplyMid)
+                    continuationSupplyMid := cvPoiMid
+            if preBearContextAllowed and preferredSupplyRank and validSupplyPoi and (zNear or zTouch) and matchedSupplyIdx == -1
+                matchedSupplyIdx := i
+                nearStrongHigh := zNear
+                bearPoiTouchNow := zTouch
+                matchedSupplyMid := zMid
+
+// Strong HTF / swing POI: arm continuation when price reacts at structural low/high or chart swing POI.
+if htfStrongLowContext
+    continuationDemandContext := true
+    if na(continuationDemandMid)
+        continuationDemandMid := htfSwingLow
+if chartSwingDemandPoiTouch
+    continuationDemandContext := true
+    if na(continuationDemandMid)
+        continuationDemandMid := not na(poiDemandMid) ? poiDemandMid : htfSwingLow
+if htfStrongHighContext
+    continuationSupplyContext := true
+    if na(continuationSupplyMid)
+        continuationSupplyMid := htfSwingHigh
+if chartSwingSupplyPoiTouch
+    continuationSupplyContext := true
+    if na(continuationSupplyMid)
+        continuationSupplyMid := not na(poiSupplyMid) ? poiSupplyMid : htfSwingHigh
+
+parentLegSafeToTrade = (parentExternalBias == BULLISH and hasParentDemandSafeArea) or (parentExternalBias == BEARISH and hasParentSupplySafeArea)
+if externalBias != parentExternalBias and not parentLegSafeToTrade
+    parentExternalBias := externalBias
+allowParentLegacyTrades = externalBias != parentExternalBias and parentLegSafeToTrade
+// HTF CHoCH into warning (candidate bear) is often a pullback in a bull expansion — not a confirmed reversal until BOS.
+bullPullbackWarningActive = externalBias == BULLISH and externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BEARISH
+// Allow longs on the pullback leg: value / demand / external POI touch paths (mirrors Cash Vault pullback continuation).
+bullPullbackLegOk = bullPullbackWarningActive and (inDiscount or bullPdZoneContext or matchedDemandIdx != -1 or nearStrongLow or entryTfValueRelaxBull)
+// During bear->bull candidate (warning): do not keep full bear permission from externalBias alone (avoids sells in discount before BOS).
+allowBullDirection = (externalBias == BULLISH and (not bullPullbackWarningActive or bullPullbackLegOk)) or (allowParentLegacyTrades and parentExternalBias == BULLISH) or (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BULLISH and inDiscount and (matchedDemandIdx != -1 or bullPdZoneContext)) or strongLowBullContext
+// Do not hunt bearish setups on premium+supply while external bias is still BULLISH and only a bearish *candidate* (CHoCH without confirmed BOS flip). Strong-high sells suppressed until HTF bias actually turns BEARISH.
+allowBearDirection = (externalBias == BEARISH and not (externalFlipState == FLIP_STATE_WARNING and candidateExternalBias == BULLISH)) or (allowParentLegacyTrades and parentExternalBias == BEARISH) or (not bullPullbackWarningActive and strongHighBearContext)
+
+// Sweep FVG taps can also open continuation evaluation context.
+int bs = array.size(bullSweepFvgTops)
+if useSweepFvgContinuation and allowBullDirection and bs > 0
+    for i = bs - 1 to 0
+        t = array.get(bullSweepFvgTouches, i)
+        if t < 3
+            zTop = array.get(bullSweepFvgTops, i)
+            zBot = array.get(bullSweepFvgBots, i)
+            insideNow = high >= zBot and low <= zTop
+            wasInside = array.get(bullSweepFvgInside, i)
+            if insideNow and not wasInside
+                array.set(bullSweepFvgTouches, i, t + 1)
+            array.set(bullSweepFvgInside, i, insideNow)
+            if insideNow
+                bullSweepTapContext := true
+                if na(continuationDemandMid)
+                    continuationDemandMid := (zTop + zBot) * 0.5
+
+int ss = array.size(bearSweepFvgTops)
+if useSweepFvgContinuation and allowBearDirection and ss > 0
+    for i = ss - 1 to 0
+        t = array.get(bearSweepFvgTouches, i)
+        if t < 3
+            zTop = array.get(bearSweepFvgTops, i)
+            zBot = array.get(bearSweepFvgBots, i)
+            insideNow = high >= zBot and low <= zTop
+            wasInside = array.get(bearSweepFvgInside, i)
+            if insideNow and not wasInside
+                array.set(bearSweepFvgTouches, i, t + 1)
+            array.set(bearSweepFvgInside, i, insideNow)
+            if insideNow
+                bearSweepTapContext := true
+                if na(continuationSupplyMid)
+                    continuationSupplyMid := (zTop + zBot) * 0.5
+
+// If expansion-leg inefficiencies exist and price revisits them in discount/premium,
+// start evaluating continuation entries.
+int be = array.size(bullExpansionFvgTops)
+if useExpansionInefficiencyContext and allowBullDirection and bullHtfValueOk and be > 0
+    for i = be - 1 to 0
+        t = array.get(bullExpansionFvgTouches, i)
+        if t < 3
+            zTop = array.get(bullExpansionFvgTops, i)
+            zBot = array.get(bullExpansionFvgBots, i)
+            insideNow = high >= zBot and low <= zTop
+            wasInside = array.get(bullExpansionFvgInside, i)
+            if insideNow and not wasInside
+                array.set(bullExpansionFvgTouches, i, t + 1)
+            array.set(bullExpansionFvgInside, i, insideNow)
+            if insideNow
+                continuationDemandContext := true
+                if na(continuationDemandMid)
+                    continuationDemandMid := (zTop + zBot) * 0.5
+
+int se = array.size(bearExpansionFvgTops)
+if useExpansionInefficiencyContext and allowBearDirection and bearHtfValueOk and se > 0
+    for i = se - 1 to 0
+        t = array.get(bearExpansionFvgTouches, i)
+        if t < 3
+            zTop = array.get(bearExpansionFvgTops, i)
+            zBot = array.get(bearExpansionFvgBots, i)
+            insideNow = high >= zBot and low <= zTop
+            wasInside = array.get(bearExpansionFvgInside, i)
+            if insideNow and not wasInside
+                array.set(bearExpansionFvgTouches, i, t + 1)
+            array.set(bearExpansionFvgInside, i, insideNow)
+            if insideNow
+                continuationSupplyContext := true
+                if na(continuationSupplyMid)
+                    continuationSupplyMid := (zTop + zBot) * 0.5
+
+if externalBias != nz(externalBias[1], externalBias)
+    bullPoiTouched := false
+    bearPoiTouched := false
+    bullPoiTouchedBar := na
+    bearPoiTouchedBar := na
+
+if bullPoiTouchNow
+    bullPoiTouched := true
+    bullPoiTouchedBar := bar_index
+if bearPoiTouchNow
+    bearPoiTouched := true
+    bearPoiTouchedBar := bar_index
+
+bullPoiContext = matchedDemandIdx != -1 or bullPoiTouched or nearStrongLow or strongLowBullContext
+bearPoiContext = matchedSupplyIdx != -1 or bearPoiTouched or nearStrongHigh or strongHighBearContext
+// HTF POI tap (Cash Vault box) when enabled; else same POI context as armed filter.
+strictHtfPoiTapBull = useCashVaultHtfPoi ? cvPoiTapped : bullPoiContext
+strictHtfPoiTapBear = useCashVaultHtfPoi ? cvPoiTapped : bearPoiContext
+strictHtfPoiTapBullEff = strictHtfPoiTapBull or entryTfValueRelaxBull
+strictHtfPoiTapBearEff = strictHtfPoiTapBear or entryTfValueRelaxBear
+armedBull = bullPoiContext and bullHtfValueOk and allowBullDirection
+armedBear = bearPoiContext and bearHtfValueOk and allowBearDirection
+bullBiasConfirmed = externalBias == BULLISH and externalFlipState == FLIP_STATE_NORMAL
+bearBiasConfirmed = externalBias == BEARISH and externalFlipState == FLIP_STATE_NORMAL
+bearInBullBiasLocationOk = inPremium or matchedSupplyIdx != -1
+bullInBearBiasLocationOk = inDiscount or matchedDemandIdx != -1
+// After opposite CHOCH, before BOS: keep trading current externalBias only from valid sided POIs / value zones.
+flipWarningActive = externalFlipState == FLIP_STATE_WARNING
+warningBullLocationOk = matchedDemandIdx != -1 or bullPdZoneContext or (bullPoiContext and (inDiscount or entryTfValueRelaxBull)) or strongLowBullContext
+warningBearLocationOk = matchedSupplyIdx != -1 or bearPdZoneContext or (bearPoiContext and (inPremium or entryTfValueRelaxBear)) or strongHighBearContext
+
+// Phase model: external trend -> pullback -> entry window.
+if allowBullDirection
+    marketPhase := (bullPoiContext and bullHtfValueOk) ? 1 : marketPhase
+if allowBearDirection
+    marketPhase := (bearPoiContext and bearHtfValueOk) ? 1 : marketPhase
+
+// LTF displacement comes from entry timeframe criteria tuple.
+bullDisplacement = ltfBullDisp
+bearDisplacement = ltfBearDisp
+bullContinuationBase = continuationDemandContext or bullSweepTapContext
+bearContinuationBase = continuationSupplyContext or bearSweepTapContext
+bullContinuation = bullContinuationBase and not na(continuationDemandMid) and close > open and close > continuationDemandMid
+bearContinuation = bearContinuationBase and not na(continuationSupplyMid) and close < open and close < continuationSupplyMid
+
+// Find origin candle for displacement.
+findLastOppositeCandle(bool bullishMove, int lookback) =>
+    int found = na
+    for i = 1 to lookback
+        isOpposite = bullishMove ? close[i] < open[i] : close[i] > open[i]
+        if isOpposite and na(found)
+            found := i
+    found
+
+// Extra POIs from impulsive OB+FVG continuation legs.
+if useImpulseObFvgPoi
+    bullImpulseNow = externalBias == BULLISH and close > open and body > bodyAvg * bodyImpulseMult and low > high[2]
+    bearImpulseNow = externalBias == BEARISH and close < open and body > bodyAvg * bodyImpulseMult and high < low[2]
+
+    if bullImpulseNow and lastImpulseDemandPoiBar != bar_index
+        idxImp = findLastOppositeCandle(true, originLookback)
+        if not na(idxImp)
+            obTop = open[idxImp]
+            obBot = low[idxImp]
+            fvgTop = low
+            fvgBot = high[2]
+            impTop = math.max(obTop, fvgTop)
+            impBot = math.min(obBot, fvgBot)
+            if impTop > impBot
+                array.push(demandZoneTops, impTop)
+                array.push(demandZoneBots, impBot)
+                array.push(demandZoneBars, bar_index)
+                array.push(demandZoneTouches, 0)
+                array.push(demandZoneInside, false)
+                array.push(demandZoneParentEq, eq)
+                if array.size(demandZoneTops) > 200
+                    array.shift(demandZoneTops)
+                    array.shift(demandZoneBots)
+                    array.shift(demandZoneBars)
+                    array.shift(demandZoneTouches)
+                    array.shift(demandZoneInside)
+                    array.shift(demandZoneParentEq)
+                lastImpulseDemandPoiBar := bar_index
+
+    if bearImpulseNow and lastImpulseSupplyPoiBar != bar_index
+        idxImp = findLastOppositeCandle(false, originLookback)
+        if not na(idxImp)
+            obTop = high[idxImp]
+            obBot = open[idxImp]
+            fvgTop = low[2]
+            fvgBot = high
+            impTop = math.max(obTop, fvgTop)
+            impBot = math.min(obBot, fvgBot)
+            if impTop > impBot
+                array.push(supplyZoneTops, impTop)
+                array.push(supplyZoneBots, impBot)
+                array.push(supplyZoneBars, bar_index)
+                array.push(supplyZoneTouches, 0)
+                array.push(supplyZoneInside, false)
+                array.push(supplyZoneParentEq, eq)
+                if array.size(supplyZoneTops) > 200
+                    array.shift(supplyZoneTops)
+                    array.shift(supplyZoneBots)
+                    array.shift(supplyZoneBars)
+                    array.shift(supplyZoneTouches)
+                    array.shift(supplyZoneInside)
+                    array.shift(supplyZoneParentEq)
+                lastImpulseSupplyPoiBar := bar_index
+
+// Large directional FVG-only POIs:
+// If FVG is large enough, use the gap itself as POI (no OB retest required).
+if useLargeDirectionalFvgPoi
+    bullFvgNow = low > high[2]
+    bullFvgTop = low
+    bullFvgBot = high[2]
+    bullFvgSize = bullFvgTop - bullFvgBot
+    bullLargeFvg = bullFvgNow and bullFvgSize >= atr * largeFvgMinAtr
+
+    bearFvgNow = high < low[2]
+    bearFvgTop = low[2]
+    bearFvgBot = high
+    bearFvgSize = bearFvgTop - bearFvgBot
+    bearLargeFvg = bearFvgNow and bearFvgSize >= atr * largeFvgMinAtr
+
+    if externalBias == BULLISH and bullLargeFvg and lastLargeFvgBullPoiBar != bar_index
+        array.push(demandZoneTops, bullFvgTop)
+        array.push(demandZoneBots, bullFvgBot)
+        array.push(demandZoneBars, bar_index)
+        array.push(demandZoneTouches, 0)
+        array.push(demandZoneInside, false)
+        array.push(demandZoneParentEq, eq)
+        if array.size(demandZoneTops) > 200
+            array.shift(demandZoneTops)
+            array.shift(demandZoneBots)
+            array.shift(demandZoneBars)
+            array.shift(demandZoneTouches)
+            array.shift(demandZoneInside)
+            array.shift(demandZoneParentEq)
+        lastLargeFvgBullPoiBar := bar_index
+
+    if externalBias == BEARISH and bearLargeFvg and lastLargeFvgBearPoiBar != bar_index
+        array.push(supplyZoneTops, bearFvgTop)
+        array.push(supplyZoneBots, bearFvgBot)
+        array.push(supplyZoneBars, bar_index)
+        array.push(supplyZoneTouches, 0)
+        array.push(supplyZoneInside, false)
+        array.push(supplyZoneParentEq, eq)
+        if array.size(supplyZoneTops) > 200
+            array.shift(supplyZoneTops)
+            array.shift(supplyZoneBots)
+            array.shift(supplyZoneBars)
+            array.shift(supplyZoneTouches)
+            array.shift(supplyZoneInside)
+            array.shift(supplyZoneParentEq)
+        lastLargeFvgBearPoiBar := bar_index
+
+// Arm a new zone only when setup context is valid and no fresh active zone exists.
+strictBullSetup = armedBull and ltfBullChoch and strictHtfPoiTapBullEff and passLtfObRetestGateBull and ltfC1BullEntryOk
+strictBearSetup = armedBear and ltfBearChoch and strictHtfPoiTapBearEff and passLtfObRetestGateBear and ltfC1BearEntryOk
+continuationBullContext = allowBullDirection and (continuationDemandContext or bullSweepTapContext)
+continuationBearContext = allowBearDirection and (continuationSupplyContext or bearSweepTapContext)
+bullTargetDistance = htfSwingHigh - close
+bearTargetDistance = close - htfSwingLow
+bullTargetDistanceOk = not na(htfSwingHigh) and not na(htfAtr) and htfAtr > 0 and bullTargetDistance >= htfAtr * MIN_TARGET_DISTANCE_ATR and bullTargetDistance <= htfAtr * MAX_TARGET_DISTANCE_ATR
+bearTargetDistanceOk = not na(htfSwingLow) and not na(htfAtr) and htfAtr > 0 and bearTargetDistance >= htfAtr * MIN_TARGET_DISTANCE_ATR and bearTargetDistance <= htfAtr * MAX_TARGET_DISTANCE_ATR
+continuationBullSetup = continuationBullContext and useContinuationTrigger and bullContinuation and (ltfBullDisp or ltfBullChoch) and bullTargetDistanceOk and marketTradeAllowed and passLtfObRetestGateBull and (not flipWarningActive or externalBias != BULLISH or warningBullLocationOk or bullPullbackLegOk)
+continuationBearSetup = continuationBearContext and useContinuationTrigger and bearContinuation and (ltfBearDisp or ltfBearChoch) and bearTargetDistanceOk and marketTradeAllowed and passLtfObRetestGateBear and (not flipWarningActive or externalBias != BEARISH or warningBearLocationOk)
+pdBullSetup = allowBullDirection and bullPdZoneContext and bullTargetDistanceOk and close > open and marketTradeAllowed
+pdBearSetup = allowBearDirection and bearPdZoneContext and bearTargetDistanceOk and close < open and marketTradeAllowed
+continuationBullNow = continuationNowSignal and continuationBullSetup
+continuationBearNow = continuationNowSignal and continuationBearSetup
+newBullSetup = (strictBullSetup and marketTradeAllowed and bullTargetDistanceOk) or (continuationBullSetup and not continuationBullNow) or pdBullSetup
+newBearSetup = (strictBearSetup and marketTradeAllowed and bearTargetDistanceOk) or (continuationBearSetup and not continuationBearNow) or pdBearSetup
+// Warning: block opposite pending flip until BOS — except pullback-leg longs when candidate bear (CHoCH-only pullback into POI).
+newBullSetup := newBullSetup and (not (flipWarningActive and externalBias == BULLISH and candidateExternalBias == BEARISH) or bullPullbackLegOk)
+newBearSetup := newBearSetup and not (flipWarningActive and externalBias == BEARISH and candidateExternalBias == BULLISH)
+newBullSetup := newBullSetup and (not (flipWarningActive and externalBias == BULLISH) or warningBullLocationOk or bullPullbackLegOk)
+newBearSetup := newBearSetup and (not (flipWarningActive and externalBias == BEARISH) or warningBearLocationOk)
+newBullSetup := newBullSetup and (not bearBiasConfirmed or bullInBearBiasLocationOk)
+newBearSetup := newBearSetup and (not bullBiasConfirmed or bearInBullBiasLocationOk)
+limitBullSignal := false
+limitBearSignal := false
+nowBullSignal := false
+nowBearSignal := false
+nowSignalSuffix := ""
+
+if continuationBullNow
+    bullPoiKey = not na(continuationDemandMid) ? continuationDemandMid : close
+    allowBullNow = na(lastBullSignalPoiKey) or math.abs(bullPoiKey - lastBullSignalPoiKey) > syminfo.mintick * 10
+    if allowBullNow
+        nowBullSignal := true
+        line.new(bar_index, close, bar_index + nowLineBars, close, xloc = xloc.bar_index, color = color.new(color.green, 0), width = 2)
+        nowSignalSuffix := " [CONT]"
+        label.new(bar_index + nowLineBars, close, "BUY NOW @ " + str.tostring(close, format.mintick) + nowSignalSuffix, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, textcolor = color.white, color = color.new(color.green, 0))
+        lastBullSignalPoiKey := bullPoiKey
+        marketPhase := 0
+
+if continuationBearNow
+    bearPoiKey = not na(continuationSupplyMid) ? continuationSupplyMid : close
+    allowBearNow = na(lastBearSignalPoiKey) or math.abs(bearPoiKey - lastBearSignalPoiKey) > syminfo.mintick * 10
+    if allowBearNow
+        nowBearSignal := true
+        line.new(bar_index, close, bar_index + nowLineBars, close, xloc = xloc.bar_index, color = color.new(color.red, 0), width = 2)
+        nowSignalSuffix := " [CONT]"
+        label.new(bar_index + nowLineBars, close, "SELL NOW @ " + str.tostring(close, format.mintick) + nowSignalSuffix, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, textcolor = color.white, color = color.new(color.red, 0))
+        lastBearSignalPoiKey := bearPoiKey
+        marketPhase := 0
+
+if newBullSetup
+    bullStrictZone = strictBullSetup and marketTradeAllowed and bullTargetDistanceOk
+    if bullStrictZone
+        zoneDir := BULLISH
+        zoneHigh := ltfBullObTop
+        zoneLow := ltfBullObBot
+        zoneEntryMid := ltfC1BullEntry
+        zoneBornBar := bar_index
+        zoneActive := true
+        zoneUsed := false
+        zoneTouchCount := 0
+        zoneWasInside := false
+        marketPhase := 2
+        limitBullSignal := true
+        line.new(bar_index, zoneEntryMid, bar_index + limitLineBars, zoneEntryMid, xloc = xloc.bar_index, color = color.new(color.green, 20), width = 1)
+    else
+        idx = findLastOppositeCandle(true, originLookback)
+        if not na(idx)
+            zoneDir := BULLISH
+            zoneHigh := open[idx]
+            zoneLow := low[idx]
+            zoneEntryMid := na
+            zoneBornBar := bar_index
+            zoneActive := true
+            zoneUsed := false
+            zoneTouchCount := 0
+            zoneWasInside := false
+            marketPhase := 2
+            limitBullSignal := true
+            line.new(bar_index, zoneHigh, bar_index + limitLineBars, zoneHigh, xloc = xloc.bar_index, color = color.new(color.green, 20), width = 1)
+
+if newBearSetup
+    bearStrictZone = strictBearSetup and marketTradeAllowed and bearTargetDistanceOk
+    if bearStrictZone
+        zoneDir := BEARISH
+        zoneHigh := ltfBearObTop
+        zoneLow := ltfBearObBot
+        zoneEntryMid := ltfC1BearEntry
+        zoneBornBar := bar_index
+        zoneActive := true
+        zoneUsed := false
+        zoneTouchCount := 0
+        zoneWasInside := false
+        marketPhase := 2
+        limitBearSignal := true
+        line.new(bar_index, zoneEntryMid, bar_index + limitLineBars, zoneEntryMid, xloc = xloc.bar_index, color = color.new(color.red, 20), width = 1)
+    else
+        idx = findLastOppositeCandle(false, originLookback)
+        if not na(idx)
+            zoneDir := BEARISH
+            zoneHigh := high[idx]
+            zoneLow := open[idx]
+            zoneEntryMid := na
+            zoneBornBar := bar_index
+            zoneActive := true
+            zoneUsed := false
+            zoneTouchCount := 0
+            zoneWasInside := false
+            marketPhase := 2
+            limitBearSignal := true
+            line.new(bar_index, zoneLow, bar_index + limitLineBars, zoneLow, xloc = xloc.bar_index, color = color.new(color.red, 20), width = 1)
+
+// Expire active entry zone only after 3 touches.
+zoneInsideNow = zoneActive and high >= zoneLow and low <= zoneHigh
+if zoneInsideNow and not zoneWasInside
+    zoneTouchCount += 1
+zoneWasInside := zoneInsideNow
+if zoneActive and zoneTouchCount >= 3
+    zoneActive := false
+
+// Entry trigger: first mitigation into zone, one signal per zone.
+bullEntry = zoneActive and not zoneUsed and zoneDir == BULLISH and externalBias == BULLISH and marketTradeAllowed and bullTargetDistanceOk and low <= zoneHigh and high >= zoneLow
+bearEntry = zoneActive and not zoneUsed and zoneDir == BEARISH and externalBias == BEARISH and marketTradeAllowed and bearTargetDistanceOk and high >= zoneLow and low <= zoneHigh and (not bullBiasConfirmed or bearInBullBiasLocationOk)
+
+if bullEntry
+    // Approx RR check using swing high as TP and zone low as SL proxy.
+    risk = math.max(close - zoneLow, syminfo.mintick)
+    reward = math.max(trailing.top - close, 0.0)
+    if reward / risk >= minRR
+        bullZoneKey = not na(zoneEntryMid) ? zoneEntryMid : (zoneHigh + zoneLow) * 0.5
+        allowBullNow = na(lastBullSignalPoiKey) or math.abs(bullZoneKey - lastBullSignalPoiKey) > syminfo.mintick * 10
+        if allowBullNow
+            line.new(bar_index, close, bar_index + nowLineBars, close, xloc = xloc.bar_index, color = color.new(color.green, 0), width = 2)
+            nowSignalSuffix := " [ZONE]"
+            label.new(bar_index + nowLineBars, close, "BUY NOW @ " + str.tostring(close, format.mintick) + nowSignalSuffix, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, textcolor = color.white, color = color.new(color.green, 0))
+            nowBullSignal := true
+            lastBullSignalPoiKey := bullZoneKey
+            zoneUsed := true
+            marketPhase := 0
+
+if bearEntry
+    // Approx RR check using swing low as TP and zone high as SL proxy.
+    risk = math.max(zoneHigh - close, syminfo.mintick)
+    reward = math.max(close - trailing.bottom, 0.0)
+    if reward / risk >= minRR
+        bearZoneKey = not na(zoneEntryMid) ? zoneEntryMid : (zoneHigh + zoneLow) * 0.5
+        allowBearNow = na(lastBearSignalPoiKey) or math.abs(bearZoneKey - lastBearSignalPoiKey) > syminfo.mintick * 10
+        if allowBearNow
+            line.new(bar_index, close, bar_index + nowLineBars, close, xloc = xloc.bar_index, color = color.new(color.red, 0), width = 2)
+            nowSignalSuffix := " [ZONE]"
+            label.new(bar_index + nowLineBars, close, "SELL NOW @ " + str.tostring(close, format.mintick) + nowSignalSuffix, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, textcolor = color.white, color = color.new(color.red, 0))
+            nowBearSignal := true
+            lastBearSignalPoiKey := bearZoneKey
+            zoneUsed := true
+            marketPhase := 0
+
+// -------------------------------------------------------------------------------------------------
+// Visuals
+// -------------------------------------------------------------------------------------------------
+if showZones
+    if zoneActive and not zoneUsed
+        if na(activeZoneBox)
+            activeZoneBox := box.new(left = bar_index, top = zoneHigh, right = bar_index + 1, bottom = zoneLow, bgcolor = color.new(zoneDir == BULLISH ? color.green : color.red, 84), border_color = color.new(zoneDir == BULLISH ? color.green : color.red, 10))
+        else
+            box.set_left(activeZoneBox, zoneBornBar)
+            box.set_right(activeZoneBox, bar_index + 1)
+            box.set_top(activeZoneBox, zoneHigh)
+            box.set_bottom(activeZoneBox, zoneLow)
+            box.set_bgcolor(activeZoneBox, color.new(zoneDir == BULLISH ? color.green : color.red, 84))
+            box.set_border_color(activeZoneBox, color.new(zoneDir == BULLISH ? color.green : color.red, 10))
+    else
+        if not na(activeZoneBox)
+            box.delete(activeZoneBox)
+            activeZoneBox := na
+
+plot(showDebug ? eq : na, "Equilibrium", color = color.new(color.gray, 20))
+
+if showStrongWeakInput
+    if not na(demandPoiBar) and demandPoiBar != lastDemandPoiMarkedBar and not na(poiDemandMid)
+        line.new(demandPoiBar, poiDemandMid, demandPoiBar + poiLineBars, poiDemandMid, xloc = xloc.bar_index, color = color.new(color.green, 0), width = 2)
+        label.new(demandPoiBar + poiLineBars, poiDemandMid, "Strong Low POI (Buy)", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = color.new(color.green, 80), textcolor = color.white, size = size.tiny)
+        lastDemandPoiMarkedBar := demandPoiBar
+    if not na(supplyPoiBar) and supplyPoiBar != lastSupplyPoiMarkedBar and not na(poiSupplyMid)
+        line.new(supplyPoiBar, poiSupplyMid, supplyPoiBar + poiLineBars, poiSupplyMid, xloc = xloc.bar_index, color = color.new(color.red, 0), width = 2)
+        label.new(supplyPoiBar + poiLineBars, poiSupplyMid, "Weak High POI (Sell)", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = color.new(color.red, 80), textcolor = color.white, size = size.tiny)
+        lastSupplyPoiMarkedBar := supplyPoiBar
+else
+    strongHighLine := na
+    strongLowLine := na
+    strongHighLabel := na
+    strongLowLabel := na
+
+alertcondition(nowBullSignal, "Bullish Entry", "BUY NOW signal")
+alertcondition(nowBearSignal, "Bearish Entry", "SELL NOW signal")
+alertcondition(limitBullSignal, "Bullish Limit Setup", "BUY LIMIT setup created")
+alertcondition(limitBearSignal, "Bearish Limit Setup", "SELL LIMIT setup created")
+plot(showDebug ? marketPhase : na, "Market Phase", color = color.new(color.blue, 0))
+plot(showDebug ? entryAdx : na, "Entry ADX", color = color.new(color.orange, 0))

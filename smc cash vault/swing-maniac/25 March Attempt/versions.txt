@@ -1,0 +1,62 @@
+V.10
+Good at marking out strong and weak zones. 
+Also marking out Strong Orderblocks
+Also Tracking current External Bias
+
+V.1.1
+Solved the issue of signals not being fired in the right place
+Fixed issue where script assumed that signals need to first retest the originating POI. 
+Minimam RR filter
+Pending issue the Bias is still changing from internal bias.
+
+Entry model. 
+even on 1H, 1H CHOCH. entry at the OB that caused the CHOCH. (ofcourse it has to go to the direction of the Trend)
+
+V.1.2
+
+- When in middle zone i.e buys are not dominating and sells are not dominating
+If we land on unmitigated supply or demand then we should look out for IFVG formations on the same time frame. 
+
+once the opposite ifvg is violated then enter 
+Signals gating
+We added 4H external-structure gating that tracks whether bullish/bearish 
+external CHOCH has appeared, then temporarily blocks strong/flow entries
+on the opposite side (sell hold after bull CHOCH until bear CHOCH appears, 
+and vice versa for buys). Once both CHOCH sides are seen, both sides can trade again, and any external BOS resets the phase state; fallback IFVG logic remains independent.
+
+I need to fix how do we define POIS
+
+- substituted 5m -CHOCH entries with 15m ones
+
+V1.3
+POI “FVG after OB” quality filter
+Second POI entry path (15m CHOCH → OB retest)
+
+V1.4
+- updated the external bias to be based on external structure
+
+v1.5
+
+1. Strong-zone counter-trend gate
+Touch the Lux strong band (same band as your Strong box) → turn on a counter-trend leg mode (long from strong demand, short from strong supply).
+While that mode is on: only trades in the direction of that leg; opposing strong/flow/fallback/pattern signals are off.
+Exit when price hits the weak band, chart TF swing flips (tfSwingTrendBias vs armed value), or optional opposing External CHoCH on 4H.
+Flow can arm with bias OR the gate; mixed External CHoCH blocks are relaxed when the gate matches.
+Alerts / debug include a CT Gate state (CT_LONG / CT_SHORT / OFF).
+
+2. IFVG fallback: extremes only for formation, not for killing the setup
+Formation (flow touch + first FVG in the window) stays tied to the bottom/top fraction of the swing (ifvgFallbackSwingFrac, default 30%).
+Violation, retest, and entry are not cancelled just because price goes to EQ and back — we removed the abort logic that cleared waits when price left the extreme band.
+Violations and fallback entries no longer require the extreme band on every bar; tracking of newer FVGs after a candidate exists can happen without the extreme filter.
+Split bearFvgFormedExtremeCtx / bullFvgFormedExtremeCtx for initial formation vs plain bearFvgFormedSel for tracking.
+
+3. Chart leg “CHoCH + BOS” tracking + mixed-gate bypass
+Tracks chart micro CHoCH (bullChoch15 / bearChoch15) and Lux swing BOS (tfBullBreak / tfBearBreak per side).
+ctfLongLegFull / ctfShortLegFull = that side has seen both CHoCH and BOS before the opposing swing BOS clears it.
+New input: Chart leg: bypass mixed gate if opposite leg incomplete — when your long leg is full and the short leg isn’t (or the reverse), external mixed CHoCH can still be bypassed for strong/flow so you can keep trading the initial side until the other side fully flips (both CHoCH + BOS), not on a “half” flip.
+
+improvements. to consider
+when external gate prev is bull CHOCH + BOS. 
+Then we can allow internal entry of internal Bos plus pullback on the timeframe
+
+Also most signals need a lot of quality filtering will keep weeding out slowly

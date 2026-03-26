@@ -1,0 +1,731 @@
+//@version=5
+indicator("SMC MTF Bias & Signal Tool [4H/1H/15M]", overlay=true, max_boxes_count=100, max_lines_count=100, max_labels_count=100)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ──────────────────────────────────────────────────────────────────────────────
+groupStructure = "Structure Settings"
+swingLen = input.int(10, "Swing Lookback (bars)", group=groupStructure, minval=1)
+obLookback = input.int(30, "OB Search Lookback (bars)", group=groupStructure, minval=5)
+
+groupDisplay = "Display"
+showStrongWeak = input.bool(true, "Show Strong/Weak Zones", group=groupDisplay)
+showOBs = input.bool(true, "Show Order Blocks", group=groupDisplay)
+showFVGs = input.bool(true, "Show FVGs", group=groupDisplay)
+showBiasLabel = input.bool(true, "Show Bias Label", group=groupDisplay)
+showSignals = input.bool(true, "Show Entry Signals", group=groupDisplay)
+showSLTP = input.bool(true, "Show SL/TP Levels", group=groupDisplay)
+
+groupColors = "Colors"
+colorStrong = input.color(color.new(#2962FF, 80), "Strong Zone", group=groupColors)
+colorWeak = input.color(color.new(#FF1744, 80), "Weak Zone", group=groupColors)
+
+colorOriginDemand = input.color(color.new(#00C853, 75), "Origin Demand OB", group=groupColors)
+colorOriginSupply = input.color(color.new(#FF6D00, 75), "Origin Supply OB", group=groupColors)
+
+colorContDemand = input.color(color.new(#FFD600, 75), "Cont. Demand OB", group=groupColors)
+colorContSupply = input.color(color.new(#FFD600, 75), "Cont. Supply OB", group=groupColors)
+
+colorExtremeDemand = input.color(color.new(#AA00FF, 75), "Extreme Demand OB", group=groupColors)
+colorExtremeSupply = input.color(color.new(#AA00FF, 75), "Extreme Supply OB", group=groupColors)
+
+colorFvgBull = input.color(color.new(#00BFA5, 85), "Bullish FVG", group=groupColors)
+colorFvgBear = input.color(color.new(#FF6F00, 85), "Bearish FVG", group=groupColors)
+
+colorBuySignal = input.color(#00E676, "Buy Signal", group=groupColors)
+colorSellSignal = input.color(#FF1744, "Sell Signal", group=groupColors)
+
+colorSL = input.color(color.new(color.red, 0), "SL Line", group=groupColors)
+colorTP1 = input.color(color.new(#FFEB3B, 0), "TP1 Line", group=groupColors)
+colorTP2 = input.color(color.new(color.lime, 0), "TP2 Line", group=groupColors)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────────
+f_isBullishCandle(float o, float c) => c > o
+f_isBearishCandle(float o, float c) => c < o
+f_bodyTop(float o, float c) => math.max(o, c)
+f_bodyBot(float o, float c) => math.min(o, c)
+f_zoneOverlap(float top, float bot) =>
+    not na(top) and not na(bot) and high >= bot and low <= top
+f_bodyMitigated(float bodyTop, float bodyBot) =>
+    not na(bodyTop) and not na(bodyBot) and low <= bodyBot and high >= bodyTop
+f_fmt(float x) => str.tostring(x, format.mintick)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 4H: Swing zones, BOS/ext-CHoCH, and Type 1/3 OBs
+// ──────────────────────────────────────────────────────────────────────────────
+f_4hEngine(int _swingLen, int _obLookback) =>
+    float swHigh = na
+    float swLow = na
+    int swHighTime = na
+    int swLowTime = na
+
+    // Pivot tracking (confirmed swings only)
+    ph = ta.pivothigh(high, _swingLen, _swingLen)
+    pl = ta.pivotlow(low, _swingLen, _swingLen)
+
+    var float lastSwingHigh = na
+    var float lastSwingLow = na
+    var int lastSwingHighTime = na
+    var int lastSwingLowTime = na
+
+    if not na(ph)
+        lastSwingHigh := ph
+        lastSwingHighTime := time[_swingLen]
+    if not na(pl)
+        lastSwingLow := pl
+        lastSwingLowTime := time[_swingLen]
+
+    swHigh := lastSwingHigh
+    swLow := lastSwingLow
+    swHighTime := lastSwingHighTime
+    swLowTime := lastSwingLowTime
+
+    // BOS: close beyond previous confirmed swing
+    bullBOS = not na(swHigh) and close > swHigh and close[1] <= swHigh
+    bearBOS = not na(swLow) and close < swLow and close[1] >= swLow
+
+    // External CHoCH: sweep beyond swing and close back (no BOS on this bar)
+    extChochBull = not bullBOS and not na(swLow) and low < swLow and close > swLow
+    extChochBear = not bearBOS and not na(swHigh) and high > swHigh and close < swHigh
+
+    // Type 1 origin + Type 3 extreme (computed on BOS bars)
+    // Bullish BOS => bearish candles define demand OBs
+    odBodyTop = na
+    odBodyBot = na
+    odLow = na
+    odHigh = na
+
+    exDBodyTop = na
+    exDBodyBot = na
+    exDLow = na
+    exDHigh = na
+
+    // Bearish BOS => bullish candles define supply OBs
+    osBodyTop = na
+    osBodyBot = na
+    osLow = na
+    osHigh = na
+
+    exSBdyTop = na
+    exSBdyBot = na
+    exSLow = na
+    exSHigh = na
+
+    k = math.min(_obLookback, math.max(bar_index, 1))
+
+    if bullBOS
+        // Origin Demand (last bearish candle before BOS)
+        for i = 1 to k
+            if f_isBearishCandle(open[i], close[i])
+                odBodyTop := f_bodyTop(open[i], close[i])
+                odBodyBot := f_bodyBot(open[i], close[i])
+                odLow := low[i]
+                odHigh := high[i]
+                break
+
+        // Extreme Demand (deepest demand OB: lowest bearish body)
+        for i = 1 to k
+            if f_isBearishCandle(open[i], close[i])
+                bTop = f_bodyTop(open[i], close[i])
+                bBot = f_bodyBot(open[i], close[i])
+                if na(exDBodyBot) or bBot < exDBodyBot
+                    exDBodyTop := bTop
+                    exDBodyBot := bBot
+                    exDLow := low[i]
+                    exDHigh := high[i]
+
+    if bearBOS
+        // Origin Supply (last bullish candle before BOS)
+        for i = 1 to k
+            if f_isBullishCandle(open[i], close[i])
+                osBodyTop := f_bodyTop(open[i], close[i])
+                osBodyBot := f_bodyBot(open[i], close[i])
+                osLow := low[i]
+                osHigh := high[i]
+                break
+
+        // Extreme Supply (highest supply: highest bullish body)
+        for i = 1 to k
+            if f_isBullishCandle(open[i], close[i])
+                bTop = f_bodyTop(open[i], close[i])
+                bBot = f_bodyBot(open[i], close[i])
+                if na(exSBdyTop) or bTop > exSBdyTop
+                    // For supply we track by the body top (highest demand->supply boundary).
+                    exSBdyTop := bTop
+                    exSBdyBot := bBot
+                    exSLow := low[i]
+                    exSHigh := high[i]
+
+    bullBosTime = bullBOS ? time : na
+    bearBosTime = bearBOS ? time : na
+
+    [swHigh, swLow, swHighTime, swLowTime, bullBOS, bearBOS, extChochBull, extChochBear, bullBosTime, bearBosTime,
+     odBodyTop, odBodyBot, odLow, odHigh, osBodyTop, osBodyBot, osLow, osHigh,
+     exDBodyTop, exDBodyBot, exDLow, exDHigh, exSBdyTop, exSBdyBot, exSLow, exSHigh]
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 1H: Type 2 continuation OB + FVG alignment (computed on 1H BOS bars)
+// ──────────────────────────────────────────────────────────────────────────────
+f_1hContinuationEngine(int _swingLen, int _obLookback) =>
+    // Pivot tracking
+    ph = ta.pivothigh(high, _swingLen, _swingLen)
+    pl = ta.pivotlow(low, _swingLen, _swingLen)
+
+    var float lastSwingHigh = na
+    var float lastSwingLow = na
+
+    if not na(ph)
+        lastSwingHigh := ph
+    if not na(pl)
+        lastSwingLow := pl
+
+    bullBOS = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+    bearBOS = not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+
+    // Continuation Demand (bullish BOS on 1H)
+    cdBodyTop = na
+    cdBodyBot = na
+    cdLow = na
+    cdHigh = na
+    cdFvgTop = na
+    cdFvgBot = na
+    cdTime = na
+    cdFound = false
+
+    // Continuation Supply (bearish BOS on 1H)
+    csBodyTop = na
+    csBodyBot = na
+    csLow = na
+    csHigh = na
+    csFvgTop = na
+    csFvgBot = na
+    csTime = na
+    csFound = false
+
+    k = math.min(_obLookback, math.max(bar_index, 1))
+
+    if bullBOS
+        for i = 1 to k
+            // Candidate: bearish candle inside bullish impulse leg
+            if f_isBearishCandle(open[i], close[i])
+                // Next candle must close above candidate body
+                nextClosesAbove = close[i - 1] > f_bodyTop(open[i], close[i])
+                // Nearby bullish FVG exists (using the OB-candle as the 'current' bar for the FVG test)
+                fvgOk = (i + 2 <= k) and (low[i] > high[i + 2])
+
+                if nextClosesAbove and fvgOk and not cdFound
+                    cdBodyTop := f_bodyTop(open[i], close[i])
+                    cdBodyBot := f_bodyBot(open[i], close[i])
+                    cdLow := low[i]
+                    cdHigh := high[i]
+                    // Bullish FVG box levels: low[0] (current) down to high[2]
+                    cdFvgTop := low[i]
+                    cdFvgBot := high[i + 2]
+                    cdTime := time
+                    cdFound := true
+                    break
+
+    if bearBOS
+        for i = 1 to k
+            // Candidate: bullish candle inside bearish impulse leg
+            if f_isBullishCandle(open[i], close[i])
+                // Next candle must close below candidate body
+                nextClosesBelow = close[i - 1] < f_bodyBot(open[i], close[i])
+                // Nearby bearish FVG exists
+                fvgOk = (i + 2 <= k) and (high[i] < low[i + 2])
+
+                if nextClosesBelow and fvgOk and not csFound
+                    csBodyTop := f_bodyTop(open[i], close[i])
+                    csBodyBot := f_bodyBot(open[i], close[i])
+                    csLow := low[i]
+                    csHigh := high[i]
+                    // Bearish FVG box levels: low[2] (top) down to high[0]
+                    csFvgTop := low[i + 2]
+                    csFvgBot := high[i]
+                    csTime := time
+                    csFound := true
+                    break
+
+    [cdFound, cdBodyTop, cdBodyBot, cdLow, cdHigh, cdFvgTop, cdFvgBot, cdTime,
+     csFound, csBodyTop, csBodyBot, csLow, csHigh, csFvgTop, csFvgBot, csTime]
+
+// Security pulls (must use these exact timeframes)
+[swHigh4H, swLow4H, swHighTime4H, swLowTime4H, bullBOS4H, bearBOS4H, extBull4H, extBear4H, bullBosTime4H, bearBosTime4H,
+ odBT4H, odBB4H, odLow4H, odHigh4H,
+ osBT4H, osBB4H, osLow4H, osHigh4H,
+ exDBT4H, exDBB4H, exDLow4H, exDHigh4H,
+ exSBT4H, exSBB4H, exSLow4H, exSHigh4H] =
+    request.security(syminfo.tickerid, "240", f_4hEngine(swingLen, obLookback), lookahead=barmerge.lookahead_off)
+
+[cdFound1H, cdBT1H, cdBB1H, cdLow1H, cdHigh1H, cdFvgTop1H, cdFvgBot1H, cdTime1H,
+ csFound1H, csBT1H, csBB1H, csLow1H, csHigh1H, csFvgTop1H, csFvgBot1H, csTime1H] =
+    request.security(syminfo.tickerid, "60", f_1hContinuationEngine(swingLen, obLookback), lookahead=barmerge.lookahead_off)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Bias Engine (4H) - persistent state in chart TF
+// ──────────────────────────────────────────────────────────────────────────────
+var int bias = 0
+var int pendingBias = 0  // candidate flip direction waiting for BOS
+
+var float strongLowLevel = na
+var float strongHighLevel = na
+
+var bool extChochWarning = false
+
+newBiasThis4H = false
+
+// Trigger bias updates only when a new 4H bar begins on chart TF
+new4HBar = ta.change(time("240"))
+if new4HBar
+    prevBias = bias
+    newBiasThis4H := false
+
+    // 1) Candidate direction set by external CHoCH (but bias will not flip yet)
+    if bias == -1 and extBull4H
+        pendingBias := 1
+    else if bias == 1 and extBear4H
+        pendingBias := -1
+    // If bias is neutral, allow the next BOS to commit without waiting for ext CHoCH
+    if bias == 0
+        pendingBias := 0
+
+    // 4) Immediate switch if close breaches last confirmed strong levels
+    // We need the last 4H close on this chart update; use swHigh4H etc are from pivot,
+    // but immediate switch uses current 4H close series.
+    htfClose4H = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+    if bias == 1 and not na(strongLowLevel) and htfClose4H < strongLowLevel
+        bias := -1
+        newBiasThis4H := true
+        pendingBias := 0
+    else if bias == -1 and not na(strongHighLevel) and htfClose4H > strongHighLevel
+        bias := 1
+        newBiasThis4H := true
+        pendingBias := 0
+
+    // 3) Bias switches only when ext CHoCH candidate + opposite BOS confirms
+    if not newBiasThis4H
+        if bullBOS4H
+            if bias != 1
+                if bias == 0 or pendingBias == 1
+                    bias := 1
+                    newBiasThis4H := true
+                    pendingBias := 0
+        if bearBOS4H
+            if bias != -1
+                if bias == 0 or pendingBias == -1
+                    bias := -1
+                    newBiasThis4H := true
+                    pendingBias := 0
+
+    // 5) Warning: ext CHoCH happened but bias didn't switch
+    extNow = extBull4H or extBear4H
+    extChochWarning := extNow and not newBiasThis4H
+
+    // Store last strong levels at bias commit
+    if newBiasThis4H
+        if bias == 1
+            strongLowLevel := swLow4H
+        else if bias == -1
+            strongHighLevel := swHigh4H
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Zone State (Type 1/2/3) + mitigation flags
+// ──────────────────────────────────────────────────────────────────────────────
+var bool originDemandActive = false
+var bool originDemandMitigated = false
+var float originDemandBodyTop = na
+var float originDemandBodyBot = na
+var float originDemandLow = na
+var float originDemandHigh = na
+var int originDemandBornTime = na
+
+var bool originSupplyActive = false
+var bool originSupplyMitigated = false
+var float originSupplyBodyTop = na
+var float originSupplyBodyBot = na
+var float originSupplyLow = na
+var float originSupplyHigh = na
+var int originSupplyBornTime = na
+
+var bool contDemandActive = false
+var bool contDemandMitigated = false
+var float contDemandBodyTop = na
+var float contDemandBodyBot = na
+var float contDemandLow = na
+var float contDemandHigh = na
+var int contDemandBornTime = na
+var float contDemandFvgTop = na
+var float contDemandFvgBot = na
+
+var bool contSupplyActive = false
+var bool contSupplyMitigated = false
+var float contSupplyBodyTop = na
+var float contSupplyBodyBot = na
+var float contSupplyLow = na
+var float contSupplyHigh = na
+var int contSupplyBornTime = na
+var float contSupplyFvgTop = na
+var float contSupplyFvgBot = na
+
+var bool extremeDemandActive = false
+var bool extremeDemandMitigated = false
+var float extremeDemandBodyTop = na
+var float extremeDemandBodyBot = na
+var float extremeDemandLow = na
+var float extremeDemandHigh = na
+var int extremeDemandBornTime = na
+
+var bool extremeSupplyActive = false
+var bool extremeSupplyMitigated = false
+var float extremeSupplyBodyTop = na
+var float extremeSupplyBodyBot = na
+var float extremeSupplyLow = na
+var float extremeSupplyHigh = na
+var int extremeSupplyBornTime = na
+
+// Update zones when new BOS events are detected on their origin timeframes.
+if new4HBar
+    // Type 1 Origin OB update (computed on 4H BOS)
+    if bullBOS4H and not na(odBT4H) and not na(odBB4H)
+        originDemandActive := true
+        originDemandMitigated := false
+        originDemandBodyTop := odBT4H
+        originDemandBodyBot := odBB4H
+        originDemandLow := odLow4H
+        originDemandHigh := odHigh4H
+        originDemandBornTime := bullBosTime4H
+    if bearBOS4H and not na(osBT4H) and not na(osBB4H)
+        originSupplyActive := true
+        originSupplyMitigated := false
+        originSupplyBodyTop := osBT4H
+        originSupplyBodyBot := osBB4H
+        originSupplyLow := osLow4H
+        originSupplyHigh := osHigh4H
+        originSupplyBornTime := bearBosTime4H
+
+    // Type 3 Extreme OB: deepest OB for the current trend leg.
+    // We update every time the matching 4H BOS forms while bias remains on that side.
+    if bias == 1 and bullBOS4H and not na(exDBT4H)
+        extremeDemandActive := true
+        extremeDemandMitigated := false
+        extremeDemandBodyTop := exDBT4H
+        extremeDemandBodyBot := exDBB4H
+        extremeDemandLow := exDLow4H
+        extremeDemandHigh := exDHigh4H
+        extremeDemandBornTime := bullBosTime4H
+    if bias == -1 and bearBOS4H and not na(exSBT4H)
+        extremeSupplyActive := true
+        extremeSupplyMitigated := false
+        extremeSupplyBodyTop := exSBT4H
+        extremeSupplyBodyBot := exSBB4H
+        extremeSupplyLow := exSLow4H
+        extremeSupplyHigh := exSHigh4H
+        extremeSupplyBornTime := bearBosTime4H
+
+// Update continuation OBs on new 1H bars when a 1H BOS triggers (computed inside the 1H engine)
+new1HBar = ta.change(time("60"))
+if new1HBar
+    if cdFound1H and not na(cdBT1H) and not na(cdBB1H)
+        contDemandActive := true
+        contDemandMitigated := false
+        contDemandBodyTop := cdBT1H
+        contDemandBodyBot := cdBB1H
+        contDemandLow := cdLow1H
+        contDemandHigh := cdHigh1H
+        contDemandBornTime := cdTime1H
+        contDemandFvgTop := cdFvgTop1H
+        contDemandFvgBot := cdFvgBot1H
+    if csFound1H and not na(csBT1H) and not na(csBB1H)
+        contSupplyActive := true
+        contSupplyMitigated := false
+        contSupplyBodyTop := csBT1H
+        contSupplyBodyBot := csBB1H
+        contSupplyLow := csLow1H
+        contSupplyHigh := csHigh1H
+        contSupplyBornTime := csTime1H
+        contSupplyFvgTop := csFvgTop1H
+        contSupplyFvgBot := csFvgBot1H
+
+// Mitigation checks (OBs mitigated when price trades through full candle body)
+if originDemandActive and not originDemandMitigated and f_bodyMitigated(originDemandBodyTop, originDemandBodyBot)
+    originDemandMitigated := true
+    originDemandActive := false
+
+if originSupplyActive and not originSupplyMitigated and f_bodyMitigated(originSupplyBodyTop, originSupplyBodyBot)
+    originSupplyMitigated := true
+    originSupplyActive := false
+
+if contDemandActive and not contDemandMitigated and f_bodyMitigated(contDemandBodyTop, contDemandBodyBot)
+    contDemandMitigated := true
+    contDemandActive := false
+
+if contSupplyActive and not contSupplyMitigated and f_bodyMitigated(contSupplyBodyTop, contSupplyBodyBot)
+    contSupplyMitigated := true
+    contSupplyActive := false
+
+if extremeDemandActive and not extremeDemandMitigated and f_bodyMitigated(extremeDemandBodyTop, extremeDemandBodyBot)
+    extremeDemandMitigated := true
+    extremeDemandActive := false
+
+if extremeSupplyActive and not extremeSupplyMitigated and f_bodyMitigated(extremeSupplyBodyTop, extremeSupplyBodyBot)
+    extremeSupplyMitigated := true
+    extremeSupplyActive := false
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Step 1 price location label
+// ──────────────────────────────────────────────────────────────────────────────
+mid4H = not na(swLow4H) and not na(swHigh4H) ? (swLow4H + swHigh4H) * 0.5 : na
+priceLocText = not na(mid4H) ? (close > mid4H ? "Price in PREMIUM → Weak Zone" : "Price in DISCOUNT → Strong Zone") : "Analysing..."
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Step 6: 15M Micro CHoCH (entry trigger)
+// ──────────────────────────────────────────────────────────────────────────────
+recentSwingHigh5 = ta.highest(high, 5)
+recentSwingLow5 = ta.lowest(low, 5)
+localDown = not na(close[3]) ? close[1] < close[3] : false
+localUp = not na(close[3]) ? close[1] > close[3] : false
+
+bullChoch15 = barstate.isconfirmed and not na(recentSwingHigh5[1]) and close > recentSwingHigh5[1] and close[1] <= recentSwingHigh5[1] and localDown
+bearChoch15 = barstate.isconfirmed and not na(recentSwingLow5[1]) and close < recentSwingLow5[1] and close[1] >= recentSwingLow5[1] and localUp
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Step 7: Signals (6 types)
+// ──────────────────────────────────────────────────────────────────────────────
+// Zone overlap checks use the OB candle BODY (mitigation bounds)
+inOriginDemand = originDemandActive and f_zoneOverlap(originDemandBodyTop, originDemandBodyBot)
+inOriginSupply = originSupplyActive and f_zoneOverlap(originSupplyBodyTop, originSupplyBodyBot)
+inContDemand = contDemandActive and f_zoneOverlap(contDemandBodyTop, contDemandBodyBot)
+inContSupply = contSupplyActive and f_zoneOverlap(contSupplyBodyTop, contSupplyBodyBot)
+inExtremeDemand = extremeDemandActive and f_zoneOverlap(extremeDemandBodyTop, extremeDemandBodyBot)
+inExtremeSupply = extremeSupplyActive and f_zoneOverlap(extremeSupplyBodyTop, extremeSupplyBodyBot)
+
+continuationBuy = bias == 1 and inContDemand and bullChoch15
+originBuy = bias == 1 and inOriginDemand and bullChoch15
+extremeBuy = bias == -1 and inExtremeDemand and bullChoch15
+
+continuationSell = bias == -1 and inContSupply and bearChoch15
+originSell = bias == -1 and inOriginSupply and bearChoch15
+extremeSell = bias == 1 and inExtremeSupply and bearChoch15
+
+anySignal = continuationBuy or originBuy or extremeBuy or continuationSell or originSell or extremeSell
+
+// Signal types + zone level for labels/alerts
+signalName =
+    continuationBuy ? "CONT BUY" : originBuy ? "ORIGIN BUY" : extremeBuy ? "EXTREME BUY ⚠" : continuationSell ? "CONT SELL" : originSell ? "ORIGIN SELL" : extremeSell ? "EXTREME SELL ⚠" : ""
+
+signalDir = (continuationBuy or originBuy or extremeBuy) ? "BUY" : (continuationSell or originSell or extremeSell) ? "SELL" : ""
+
+signalZoneMid = continuationBuy ? (contDemandBodyTop + contDemandBodyBot) * 0.5 : originBuy ? (originDemandBodyTop + originDemandBodyBot) * 0.5 : extremeBuy ? (extremeDemandBodyTop + extremeDemandBodyBot) * 0.5 : continuationSell ? (contSupplyBodyTop + contSupplyBodyBot) * 0.5 : originSell ? (originSupplyBodyTop + originSupplyBodyBot) * 0.5 : extremeSell ? (extremeSupplyBodyTop + extremeSupplyBodyBot) * 0.5 : na
+
+// SL/TP computation (depends on OB wick levels for SL and range extremes for TP2)
+// TP2 is the full Weak Zone level for BUY and full Strong Zone level for SELL.
+atr14 = ta.atr(14)
+entryPrice = close
+tp2 = (continuationBuy or originBuy or extremeBuy) and not na(swHigh4H) ? swHigh4H : (continuationSell or originSell or extremeSell) and not na(swLow4H) ? swLow4H : na
+
+// Opposing zone is TP2; TP1 is 50% of entry->opposing distance
+tp1 = not na(tp2) ? entryPrice + (tp2 - entryPrice) * 0.5 : na
+
+// SL uses OB wick (not body)
+obLowForSL = continuationBuy ? contDemandLow : originBuy ? originDemandLow : extremeBuy ? extremeDemandLow : na
+obHighForSL = continuationSell ? contSupplyHigh : originSell ? originSupplyHigh : extremeSell ? extremeSupplyHigh : na
+
+sl = (continuationBuy or originBuy or extremeBuy) and not na(obLowForSL) ? (obLowForSL - atr14 * 0.5) : (continuationSell or originSell or extremeSell) and not na(obHighForSL) ? (obHighForSL + atr14 * 0.5) : na
+
+rr = not na(tp2) and not na(sl) ? (tp2 - entryPrice) / (entryPrice - sl) : na
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Visual: Boxes (redrawn only on last bar)
+// ──────────────────────────────────────────────────────────────────────────────
+var box strongBox = na
+var box weakBox = na
+var box originDemandBox = na
+var box originSupplyBox = na
+var box contDemandBox = na
+var box contSupplyBox = na
+var box extremeDemandBox = na
+var box extremeSupplyBox = na
+var box bullFvgBox = na
+var box bearFvgBox = na
+
+// Create/update visual elements only at the last bar to avoid repaint clutter.
+if barstate.islast
+    // Delete old boxes first
+    if not na(strongBox)
+        box.delete(strongBox)
+    if not na(weakBox)
+        box.delete(weakBox)
+    if not na(originDemandBox)
+        box.delete(originDemandBox)
+    if not na(originSupplyBox)
+        box.delete(originSupplyBox)
+    if not na(contDemandBox)
+        box.delete(contDemandBox)
+    if not na(contSupplyBox)
+        box.delete(contSupplyBox)
+    if not na(extremeDemandBox)
+        box.delete(extremeDemandBox)
+    if not na(extremeSupplyBox)
+        box.delete(extremeSupplyBox)
+    if not na(bullFvgBox)
+        box.delete(bullFvgBox)
+    if not na(bearFvgBox)
+        box.delete(bearFvgBox)
+
+    strongBox := na
+    weakBox := na
+    originDemandBox := na
+    originSupplyBox := na
+    contDemandBox := na
+    contSupplyBox := na
+    extremeDemandBox := na
+    extremeSupplyBox := na
+    bullFvgBox := na
+    bearFvgBox := na
+
+    pad = not na(atr14) ? math.max(atr14 * 0.002, syminfo.mintick * 10) : syminfo.mintick * 10
+
+    if showStrongWeak and not na(swLow4H) and not na(swHigh4H)
+        strongBox := box.new(swLowTime4H, swLow4H + pad, time, swLow4H - pad, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorStrong, border_color=colorStrong, border_width=1, text="Strong", text_color=color.white, text_size=size.tiny)
+        weakBox := box.new(swHighTime4H, swHigh4H + pad, time, swHigh4H - pad, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorWeak, border_color=colorWeak, border_width=1, text="Weak", text_color=color.white, text_size=size.tiny)
+
+    if showOBs
+        if bias == 1 and originDemandActive
+            originDemandBox := box.new(originDemandBornTime, originDemandBodyTop, time, originDemandBodyBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorOriginDemand, border_color=colorOriginDemand, border_width=1, text="Origin Demand", text_color=color.white, text_size=size.tiny)
+        if bias == -1 and originSupplyActive
+            originSupplyBox := box.new(originSupplyBornTime, originSupplyBodyTop, time, originSupplyBodyBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorOriginSupply, border_color=colorOriginSupply, border_width=1, text="Origin Supply", text_color=color.white, text_size=size.tiny)
+
+        if bias == 1 and contDemandActive
+            contDemandBox := box.new(contDemandBornTime, contDemandBodyTop, time, contDemandBodyBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorContDemand, border_color=colorContDemand, border_width=1, text="Cont. Demand", text_color=color.black, text_size=size.tiny)
+        if bias == -1 and contSupplyActive
+            contSupplyBox := box.new(contSupplyBornTime, contSupplyBodyTop, time, contSupplyBodyBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorContSupply, border_color=colorContSupply, border_width=1, text="Cont. Supply", text_color=color.black, text_size=size.tiny)
+
+        // Extreme boxes are displayed only when counter-trend signals could happen
+        if bias == -1 and extremeDemandActive
+            extremeDemandBox := box.new(extremeDemandBornTime, extremeDemandBodyTop, time, extremeDemandBodyBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorExtremeDemand, border_color=colorExtremeDemand, border_width=2, text="Extreme Demand", text_color=color.white, text_size=size.tiny)
+        if bias == 1 and extremeSupplyActive
+            extremeSupplyBox := box.new(extremeSupplyBornTime, extremeSupplyBodyTop, time, extremeSupplyBodyBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorExtremeSupply, border_color=colorExtremeSupply, border_width=2, text="Extreme Supply", text_color=color.white, text_size=size.tiny)
+
+    // FVG boxes shown only aligned with active bias and only when the related continuation zone is present/unmitigated.
+    if showFVGs
+        if bias == 1 and contDemandActive and not na(contDemandFvgTop) and not na(contDemandFvgBot) and not contDemandMitigated
+            bullFvgBox := box.new(contDemandBornTime, contDemandFvgTop, time, contDemandFvgBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorFvgBull, border_color=colorFvgBull, border_width=1, text="FVG", text_color=color.white, text_size=size.tiny)
+        if bias == -1 and contSupplyActive and not na(contSupplyFvgTop) and not na(contSupplyFvgBot) and not contSupplyMitigated
+            bearFvgBox := box.new(contSupplyBornTime, contSupplyFvgTop, time, contSupplyFvgBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorFvgBear, border_color=colorFvgBear, border_width=1, text="FVG", text_color=color.white, text_size=size.tiny)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Bias + Price Location labels (reuse single labels)
+// ──────────────────────────────────────────────────────────────────────────────
+var label biasLbl = na
+var label priceLbl = na
+
+if barstate.islast
+    biasText = bias == 1 ? "● BULLISH BIAS" : bias == -1 ? "● BEARISH BIAS" : "● NEUTRAL"
+    biasColorLbl = bias == 1 ? color.new(color.green, 0) : bias == -1 ? color.new(color.red, 0) : color.gray
+    warnTxt = extChochWarning ? " ⚠ Ext. CHoCH" : ""
+
+    yBias = high + atr14 * 2.5
+    if showBiasLabel
+        if na(biasLbl)
+            biasLbl := label.new(bar_index, yBias, biasText + warnTxt, style=label.style_label_left, color=biasColorLbl, textcolor=color.white, size=size.normal)
+        else
+            label.set_xy(biasLbl, bar_index, yBias)
+            label.set_text(biasLbl, biasText + warnTxt)
+            label.set_color(biasLbl, biasColorLbl)
+    else
+        if not na(biasLbl)
+            label.delete(biasLbl)
+            biasLbl := na
+
+    yPrice = high + atr14 * 4.0
+    if na(priceLbl)
+        priceLbl := label.new(bar_index, yPrice, priceLocText, style=label.style_label_left, color=color.new(color.gray, 80), textcolor=color.white, size=size.small)
+    else
+        label.set_xy(priceLbl, bar_index, yPrice)
+        label.set_text(priceLbl, priceLocText)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SL/TP lines + signal labels (created on confirmed bars)
+// ──────────────────────────────────────────────────────────────────────────────
+var array<line> slLines = array.new<line>()
+var array<line> tp1Lines = array.new<line>()
+var array<line> tp2Lines = array.new<line>()
+
+var array<label> sigLabels = array.new<label>()
+
+signalRRText = not na(rr) ? ("RR: 1:" + str.tostring(rr, "#.##")) : "RR: 1:na"
+
+f_createSignalVisual(float _sl, float _tp1, float _tp2) =>
+    // Lines
+    if showSLTP and not na(_sl) and not na(_tp1) and not na(_tp2)
+        l1 = line.new(bar_index, _sl, bar_index + 1, _sl, xloc=xloc.bar_index, extend=extend.right, color=colorSL, style=line.style_dashed, width=1)
+        l2 = line.new(bar_index, _tp1, bar_index + 1, _tp1, xloc=xloc.bar_index, extend=extend.right, color=colorTP1, style=line.style_dashed, width=1)
+        l3 = line.new(bar_index, _tp2, bar_index + 1, _tp2, xloc=xloc.bar_index, extend=extend.right, color=colorTP2, style=line.style_dashed, width=1)
+
+        array.push(slLines, l1)
+        array.push(tp1Lines, l2)
+        array.push(tp2Lines, l3)
+
+        // Keep memory bounded (max_lines_count=100)
+        maxKeep = 30
+        while array.size(slLines) > maxKeep
+            line.delete(array.shift(slLines))
+        while array.size(tp1Lines) > maxKeep
+            line.delete(array.shift(tp1Lines))
+        while array.size(tp2Lines) > maxKeep
+            line.delete(array.shift(tp2Lines))
+
+f_signalText() =>
+    signalName + " | " + signalRRText
+
+if showSignals and anySignal
+    // Only draw on confirmed signal bars
+    if barstate.isconfirmed
+        isBuy = continuationBuy or originBuy or extremeBuy
+        y = isBuy ? (low - atr14 * 0.3) : (high + atr14 * 0.3)
+        sigColor = isBuy ? colorBuySignal : colorSellSignal
+        tri = isBuy ? "▲ " : "▼ "
+        lbl = label.new(bar_index, y, tri + f_signalText(), style=isBuy ? label.style_label_up : label.style_label_down, color=color.new(sigColor, 0), textcolor=color.white, size=size.small)
+        array.push(sigLabels, lbl)
+
+        maxLabelsKeep = 60
+        while array.size(sigLabels) > maxLabelsKeep
+            label.delete(array.shift(sigLabels))
+
+        // Create SL/TP lines
+        f_createSignalVisual(sl, tp1, tp2)
+
+// Plot shapes (optional; kept minimal due to label requirements)
+// (intentionally not using plotshape for triangles to avoid duplicates; the label carries the triangle + RR text)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Alerts (signal type, direction, zone level, bias state)
+// ──────────────────────────────────────────────────────────────────────────────
+biasStr = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
+
+contBuyMsg = "SMC Signal: CONT BUY | Direction: BUY | Zone: " + f_fmt(contDemandBodyTop != na ? (contDemandBodyTop + contDemandBodyBot) * 0.5 : na) + " | Bias: " + biasStr
+origBuyMsg = "SMC Signal: ORIGIN BUY | Direction: BUY | Zone: " + f_fmt(originDemandBodyTop != na ? (originDemandBodyTop + originDemandBodyBot) * 0.5 : na) + " | Bias: " + biasStr
+extBuyMsg = "SMC Signal: EXTREME BUY ⚠ | Direction: BUY | Zone: " + f_fmt(extremeDemandBodyTop != na ? (extremeDemandBodyTop + extremeDemandBodyBot) * 0.5 : na) + " | Bias: " + biasStr
+
+contSellMsg = "SMC Signal: CONT SELL | Direction: SELL | Zone: " + f_fmt(contSupplyBodyTop != na ? (contSupplyBodyTop + contSupplyBodyBot) * 0.5 : na) + " | Bias: " + biasStr
+origSellMsg = "SMC Signal: ORIGIN SELL | Direction: SELL | Zone: " + f_fmt(originSupplyBodyTop != na ? (originSupplyBodyTop + originSupplyBodyBot) * 0.5 : na) + " | Bias: " + biasStr
+extSellMsg = "SMC Signal: EXTREME SELL ⚠ | Direction: SELL | Zone: " + f_fmt(extremeSupplyBodyTop != na ? (extremeSupplyBodyTop + extremeSupplyBodyBot) * 0.5 : na) + " | Bias: " + biasStr
+
+anyMsg = "SMC Signal: " + signalName + " | Direction: " + signalDir + " | Zone: " + f_fmt(signalZoneMid) + " | Bias: " + biasStr
+
+alertcondition(continuationBuy, "Continuation Buy Signal", contBuyMsg)
+alertcondition(originBuy, "Origin Buy Signal", origBuyMsg)
+alertcondition(extremeBuy, "Extreme Buy Signal ⚠", extBuyMsg)
+
+alertcondition(continuationSell, "Continuation Sell Signal", contSellMsg)
+alertcondition(originSell, "Origin Sell Signal", origSellMsg)
+alertcondition(extremeSell, "Extreme Sell Signal ⚠", extSellMsg)
+
+alertcondition(anySignal, "Any SMC Signal", anyMsg)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// End
+// ──────────────────────────────────────────────────────────────────────────────
+
