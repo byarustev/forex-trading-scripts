@@ -1,5 +1,5 @@
 //@version=5
-indicator("SMC MTF Bias & Signal Tool [4H/1H/15M] (Scratch)", overlay=true, max_boxes_count=300, max_lines_count=300, max_labels_count=500)
+indicator("Swing Maniac", overlay=true, max_boxes_count=300, max_lines_count=300, max_labels_count=500)
 
 // -------------------------------------------------------------------------------
 // Inputs

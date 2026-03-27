@@ -1,5 +1,5 @@
 //@version=5
-indicator("SMC MTF Bias & Signal Tool [4H/1H/15M] (Scratch)", overlay=true, max_boxes_count=300, max_lines_count=300, max_labels_count=500, max_bars_back=5000)
+indicator("Swing Maniac", overlay=true, max_boxes_count=300, max_lines_count=300, max_labels_count=500, max_bars_back=5000)
 
 // -------------------------------------------------------------------------------
 // Inputs
@@ -1732,15 +1732,22 @@ poi15mStrongSellTouchIfvg = usePoi15mIfvg and stStrongSell15 == 2 and not na(stS
 poi15mFlowBuyTouchIfvg = usePoi15mIfvg and stFlowBuy15 == 2 and not na(stFlowBuyEntry) and not na(stFlowBuyConfBar) and bar_index >= stFlowBuyConfBar and low <= stFlowBuyEntry + poi15mTouchTol and high >= stFlowBuyEntry - poi15mTouchTol
 poi15mFlowSellTouchIfvg = usePoi15mIfvg and stFlowSell15 == 2 and not na(stFlowSellEntry) and not na(stFlowSellConfBar) and bar_index >= stFlowSellConfBar and low <= stFlowSellEntry + poi15mTouchTol and high >= stFlowSellEntry - poi15mTouchTol
 
+flowBullChochRetestEither = bullRetest5m or bullRetest15m
+flowBullChosenObTop = bullRetest5m ? bullObTop5m : bullRetest15m ? bullObTop15m : na
+flowBullChosenObBot = bullRetest5m ? bullObBot5m : bullRetest15m ? bullObBot15m : na
+flowBearChochRetestEither = bearRetest5m or bearRetest15m
+flowBearChosenObTop = bearRetest5m ? bearObTop5m : bearRetest15m ? bearObTop15m : na
+flowBearChosenObBot = bearRetest5m ? bearObBot5m : bearRetest15m ? bearObBot15m : na
+
 poi15mStrongBuyChoch15 = usePoi15mChochOb and bullRetest15m
 poi15mStrongSellChoch15 = usePoi15mChochOb and bearRetest15m
-poi15mFlowBuyChoch15 = usePoi15mChochOb and bullRetest15m
-poi15mFlowSellChoch15 = usePoi15mChochOb and bearRetest15m
+poi15mFlowBuyChoch15 = usePoi15mChochOb and flowBullChochRetestEither
+poi15mFlowSellChoch15 = usePoi15mChochOb and flowBearChochRetestEither
 
 bullEntryTrigger = useChochObPoiEntry ? selBullRetest : (poi15mStrongBuyTouchIfvg or poi15mStrongBuyChoch15)
 bearEntryTrigger = useChochObPoiEntry ? selBearRetest : (poi15mStrongSellTouchIfvg or poi15mStrongSellChoch15)
-flowBullEntryTrigger = useChochObPoiEntry ? selBullRetest : (poi15mFlowBuyTouchIfvg or poi15mFlowBuyChoch15)
-flowBearEntryTrigger = useChochObPoiEntry ? selBearRetest : (poi15mFlowSellTouchIfvg or poi15mFlowSellChoch15)
+flowBullEntryTrigger = useChochObPoiEntry ? flowBullChochRetestEither : (poi15mFlowBuyTouchIfvg or poi15mFlowBuyChoch15)
+flowBearEntryTrigger = useChochObPoiEntry ? flowBearChochRetestEither : (poi15mFlowSellTouchIfvg or poi15mFlowSellChoch15)
 strongObBuyRaw = not pauseBuyEntriesByMajorIfvg and (not blockStrongFlowBuysMixedEff or ctGateLong) and useStrongObEntry and armBull and bullEntryTrigger and not ctGateShort
 strongObSellRaw = not pauseSellEntriesByMajorIfvg and (not blockStrongFlowSellsMixedEff or ctGateShort) and useStrongObEntry and armBear and bearEntryTrigger and not ctGateLong
 flowContBuyRaw = not pauseBuyEntriesByMajorIfvg and (not blockStrongFlowBuysMixedEff or ctGateLong) and useFlowContEntry and (bias == 1 or ctGateLong) and armFlowBull and flowBullEntryTrigger and not ctGateShort
@@ -1820,9 +1827,9 @@ rawAnySignal = strongObBuyRaw or strongObSellRaw or flowContBuyRaw or flowContSe
 float rrCandidate = na
 if rawAnySignal
     atrGate = ta.atr(14)
-    rawEntryPx = strongObBuyRaw or flowContBuyRaw ? (useChochObPoiEntry ? selBullObTop : (strongObBuyRaw ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : bullObTop15m))) : strongObSellRaw or flowContSellRaw ? (useChochObPoiEntry ? selBearObBot : (strongObSellRaw ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : bearObBot15m))) : fallbackBuyRaw ? demandIfvgEntryLevel : supplyIfvgEntryLevel
+    rawEntryPx = strongObBuyRaw or flowContBuyRaw ? (useChochObPoiEntry ? (strongObBuyRaw ? selBullObTop : (not na(flowBullChosenObTop) ? flowBullChosenObTop : selBullObTop)) : (strongObBuyRaw ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : (not na(flowBullChosenObTop) ? flowBullChosenObTop : bullObTop15m)))) : strongObSellRaw or flowContSellRaw ? (useChochObPoiEntry ? (strongObSellRaw ? selBearObBot : (not na(flowBearChosenObBot) ? flowBearChosenObBot : selBearObBot)) : (strongObSellRaw ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : (not na(flowBearChosenObBot) ? flowBearChosenObBot : bearObBot15m)))) : fallbackBuyRaw ? demandIfvgEntryLevel : supplyIfvgEntryLevel
     rawTp2 = rawIsBuy ? tfTrailingTop : tfTrailingBottom
-    rawSl = rawIsBuy ? ((strongObBuyRaw or flowContBuyRaw) ? (useChochObPoiEntry ? (not na(selBullObBot) ? selBullObBot - atrGate * 0.5 : low - atrGate * 0.5) : (strongObBuyRaw ? (poi15mStrongBuyTouchIfvg ? (not na(stStrongBuyFvgBot) ? stStrongBuyFvgBot - atrGate * 0.5 : low - atrGate * 0.5) : (not na(bullObBot15m) ? bullObBot15m - atrGate * 0.5 : low - atrGate * 0.5)) : (poi15mFlowBuyTouchIfvg ? (not na(stFlowBuyFvgBot) ? stFlowBuyFvgBot - atrGate * 0.5 : low - atrGate * 0.5) : (not na(bullObBot15m) ? bullObBot15m - atrGate * 0.5 : low - atrGate * 0.5)))) : (not na(demandIfvgBot) ? demandIfvgBot - atrGate * 0.5 : low - atrGate * 0.5)) : ((strongObSellRaw or flowContSellRaw) ? (useChochObPoiEntry ? (not na(selBearObTop) ? selBearObTop + atrGate * 0.5 : high + atrGate * 0.5) : (strongObSellRaw ? (poi15mStrongSellTouchIfvg ? (not na(stStrongSellFvgTop) ? stStrongSellFvgTop + atrGate * 0.5 : high + atrGate * 0.5) : (not na(bearObTop15m) ? bearObTop15m + atrGate * 0.5 : high + atrGate * 0.5)) : (poi15mFlowSellTouchIfvg ? (not na(stFlowSellFvgTop) ? stFlowSellFvgTop + atrGate * 0.5 : high + atrGate * 0.5) : (not na(bearObTop15m) ? bearObTop15m + atrGate * 0.5 : high + atrGate * 0.5)))) : (not na(supplyIfvgTop) ? supplyIfvgTop + atrGate * 0.5 : high + atrGate * 0.5))
+    rawSl = rawIsBuy ? ((strongObBuyRaw or flowContBuyRaw) ? (useChochObPoiEntry ? (strongObBuyRaw ? (not na(selBullObBot) ? selBullObBot - atrGate * 0.5 : low - atrGate * 0.5) : (not na(flowBullChosenObBot) ? flowBullChosenObBot - atrGate * 0.5 : (not na(selBullObBot) ? selBullObBot - atrGate * 0.5 : low - atrGate * 0.5))) : (strongObBuyRaw ? (poi15mStrongBuyTouchIfvg ? (not na(stStrongBuyFvgBot) ? stStrongBuyFvgBot - atrGate * 0.5 : low - atrGate * 0.5) : (not na(bullObBot15m) ? bullObBot15m - atrGate * 0.5 : low - atrGate * 0.5)) : (poi15mFlowBuyTouchIfvg ? (not na(stFlowBuyFvgBot) ? stFlowBuyFvgBot - atrGate * 0.5 : low - atrGate * 0.5) : (not na(flowBullChosenObBot) ? flowBullChosenObBot - atrGate * 0.5 : (not na(bullObBot15m) ? bullObBot15m - atrGate * 0.5 : low - atrGate * 0.5))))) : (not na(demandIfvgBot) ? demandIfvgBot - atrGate * 0.5 : low - atrGate * 0.5)) : ((strongObSellRaw or flowContSellRaw) ? (useChochObPoiEntry ? (strongObSellRaw ? (not na(selBearObTop) ? selBearObTop + atrGate * 0.5 : high + atrGate * 0.5) : (not na(flowBearChosenObTop) ? flowBearChosenObTop + atrGate * 0.5 : (not na(selBearObTop) ? selBearObTop + atrGate * 0.5 : high + atrGate * 0.5))) : (strongObSellRaw ? (poi15mStrongSellTouchIfvg ? (not na(stStrongSellFvgTop) ? stStrongSellFvgTop + atrGate * 0.5 : high + atrGate * 0.5) : (not na(bearObTop15m) ? bearObTop15m + atrGate * 0.5 : high + atrGate * 0.5)) : (poi15mFlowSellTouchIfvg ? (not na(stFlowSellFvgTop) ? stFlowSellFvgTop + atrGate * 0.5 : high + atrGate * 0.5) : (not na(flowBearChosenObTop) ? flowBearChosenObTop + atrGate * 0.5 : (not na(bearObTop15m) ? bearObTop15m + atrGate * 0.5 : high + atrGate * 0.5))))) : (not na(supplyIfvgTop) ? supplyIfvgTop + atrGate * 0.5 : high + atrGate * 0.5))
     rawRisk = rawIsBuy ? (rawEntryPx - rawSl) : (rawSl - rawEntryPx)
     rawReward = rawIsBuy ? (rawTp2 - rawEntryPx) : (rawEntryPx - rawTp2)
     rrCandidate := rawRisk > 0 ? (rawReward / rawRisk) : na
@@ -1954,9 +1961,9 @@ if strongObBuy
 else if strongObSell
     zoneLevelForAlert := useChochObPoiEntry ? f_mid(selBearObTop, selBearObBot) : (poi15mStrongSellTouchIfvg ? stStrongSellEntry : f_mid(bearObTop15m, bearObBot15m))
 else if flowContBuy
-    zoneLevelForAlert := useChochObPoiEntry ? f_mid(selBullObTop, selBullObBot) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : f_mid(bullObTop15m, bullObBot15m))
+    zoneLevelForAlert := useChochObPoiEntry ? f_mid(flowBullChosenObTop, flowBullChosenObBot) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : f_mid(flowBullChosenObTop, flowBullChosenObBot))
 else if flowContSell
-    zoneLevelForAlert := useChochObPoiEntry ? f_mid(selBearObTop, selBearObBot) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : f_mid(bearObTop15m, bearObBot15m))
+    zoneLevelForAlert := useChochObPoiEntry ? f_mid(flowBearChosenObTop, flowBearChosenObBot) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : f_mid(flowBearChosenObTop, flowBearChosenObBot))
 else if fallbackBuy
     zoneLevelForAlert := demandIfvgEntryLevel
 else if fallbackSell
@@ -1971,13 +1978,13 @@ if anySignal and barstate.isconfirmed
     isBuy = strongObBuy or flowContBuy or fallbackBuy
     // For strong-OB LTF entries use current-TF swing opposite side as target.
     tp2Level := isBuy ? tfTrailingTop : tfTrailingBottom
-    entryPx = strongObBuy or flowContBuy ? (useChochObPoiEntry ? selBullObTop : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : bullObTop15m))) : strongObSell or flowContSell ? (useChochObPoiEntry ? selBearObBot : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : bearObBot15m))) : fallbackBuy ? demandIfvgEntryLevel : supplyIfvgEntryLevel
+    entryPx = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (strongObBuy ? selBullObTop : (not na(flowBullChosenObTop) ? flowBullChosenObTop : selBullObTop)) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : (not na(flowBullChosenObTop) ? flowBullChosenObTop : bullObTop15m)))) : strongObSell or flowContSell ? (useChochObPoiEntry ? (strongObSell ? selBearObBot : (not na(flowBearChosenObBot) ? flowBearChosenObBot : selBearObBot)) : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : (not na(flowBearChosenObBot) ? flowBearChosenObBot : bearObBot15m)))) : fallbackBuy ? demandIfvgEntryLevel : supplyIfvgEntryLevel
     tp1Level := entryPx + (tp2Level - entryPx) * 0.5
     if isBuy
-        obLow = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (not na(selBullObBot) ? selBullObBot : low) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? (not na(stStrongBuyFvgBot) ? stStrongBuyFvgBot : low) : (not na(bullObBot15m) ? bullObBot15m : low)) : (poi15mFlowBuyTouchIfvg ? (not na(stFlowBuyFvgBot) ? stFlowBuyFvgBot : low) : (not na(bullObBot15m) ? bullObBot15m : low)))) : (not na(demandIfvgBot) ? demandIfvgBot : low)
+        obLow = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (strongObBuy ? (not na(selBullObBot) ? selBullObBot : low) : (not na(flowBullChosenObBot) ? flowBullChosenObBot : low)) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? (not na(stStrongBuyFvgBot) ? stStrongBuyFvgBot : low) : (not na(bullObBot15m) ? bullObBot15m : low)) : (poi15mFlowBuyTouchIfvg ? (not na(stFlowBuyFvgBot) ? stFlowBuyFvgBot : low) : (not na(flowBullChosenObBot) ? flowBullChosenObBot : low)))) : (not na(demandIfvgBot) ? demandIfvgBot : low)
         slLevel := obLow - atr14 * 0.5
     else
-        obHigh = strongObSell or flowContSell ? (useChochObPoiEntry ? (not na(selBearObTop) ? selBearObTop : high) : (strongObSell ? (poi15mStrongSellTouchIfvg ? (not na(stStrongSellFvgTop) ? stStrongSellFvgTop : high) : (not na(bearObTop15m) ? bearObTop15m : high)) : (poi15mFlowSellTouchIfvg ? (not na(stFlowSellFvgTop) ? stFlowSellFvgTop : high) : (not na(bearObTop15m) ? bearObTop15m : high)))) : (not na(supplyIfvgTop) ? supplyIfvgTop : high)
+        obHigh = strongObSell or flowContSell ? (useChochObPoiEntry ? (strongObSell ? (not na(selBearObTop) ? selBearObTop : high) : (not na(flowBearChosenObTop) ? flowBearChosenObTop : high)) : (strongObSell ? (poi15mStrongSellTouchIfvg ? (not na(stStrongSellFvgTop) ? stStrongSellFvgTop : high) : (not na(bearObTop15m) ? bearObTop15m : high)) : (poi15mFlowSellTouchIfvg ? (not na(stFlowSellFvgTop) ? stFlowSellFvgTop : high) : (not na(flowBearChosenObTop) ? flowBearChosenObTop : high)))) : (not na(supplyIfvgTop) ? supplyIfvgTop : high)
         slLevel := obHigh + atr14 * 0.5
     rrLevel := (tp2Level - entryPx) / (entryPx - slLevel)
 
@@ -2001,13 +2008,14 @@ if anySignal and barstate.isconfirmed
     sigCol = isBuy ? color.green : color.red
     triTxt = isBuy ? "BUY" : "SELL"
     rrTxt = not na(rrLevel) ? str.tostring(rrLevel, "#.##") : "na"
-    strongObEntryPrice = strongObBuy or flowContBuy ? (useChochObPoiEntry ? selBullObTop : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : bullObTop15m))) : strongObSell or flowContSell ? (useChochObPoiEntry ? selBearObBot : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : bearObBot15m))) : fallbackBuy ? demandIfvgEntryLevel : supplyIfvgEntryLevel
+    strongObEntryPrice = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (strongObBuy ? selBullObTop : (not na(flowBullChosenObTop) ? flowBullChosenObTop : selBullObTop)) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : (not na(flowBullChosenObTop) ? flowBullChosenObTop : bullObTop15m)))) : strongObSell or flowContSell ? (useChochObPoiEntry ? (strongObSell ? selBearObBot : (not na(flowBearChosenObBot) ? flowBearChosenObBot : selBearObBot)) : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : (not na(flowBearChosenObBot) ? flowBearChosenObBot : bearObBot15m)))) : fallbackBuy ? demandIfvgEntryLevel : supplyIfvgEntryLevel
     entryTxt = (strongObBuy or strongObSell or flowContBuy or flowContSell or fallbackBuy or fallbackSell) and not na(strongObEntryPrice) ? (" | ENTRY: " + f_fmt(strongObEntryPrice)) : ""
-    sigText = triTxt + " " + signalType + entryTxt + " | RR: 1:" + rrTxt
+    sigTooltip = triTxt + " " + signalType + entryTxt + " | RR: 1:" + rrTxt
+    sigText = triTxt + " @ " + (not na(strongObEntryPrice) ? f_fmt(strongObEntryPrice) : "na")
 
     if showSignals
         y = strongObEntryPrice
-        lbl = label.new(bar_index, y, sigText, style=label.style_label_left, color=sigCol, textcolor=color.white, size=size.small)
+        lbl = label.new(bar_index, y, sigText, style=label.style_label_left, color=sigCol, textcolor=color.white, size=size.small, tooltip=sigTooltip)
         array.push(sigLabels, lbl)
 
         // Horizontal entry marker at exact trigger price.
@@ -2098,7 +2106,7 @@ dirStr = (strongObBuy or flowContBuy) ? "BUY" : "SELL"
 dirStr := (strongObBuy or flowContBuy or fallbackBuy) ? "BUY" : "SELL"
 zoneStr = not na(zoneLevelForAlert) ? f_fmt(zoneLevelForAlert) : "na"
 symbolStr = syminfo.tickerid
-entryPxForAlert = strongObBuy or flowContBuy ? (useChochObPoiEntry ? selBullObTop : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : bullObTop15m))) : strongObSell or flowContSell ? (useChochObPoiEntry ? selBearObBot : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : bearObBot15m))) : fallbackBuy ? demandIfvgEntryLevel : fallbackSell ? supplyIfvgEntryLevel : na
+entryPxForAlert = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (strongObBuy ? selBullObTop : (not na(flowBullChosenObTop) ? flowBullChosenObTop : selBullObTop)) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : (not na(flowBullChosenObTop) ? flowBullChosenObTop : bullObTop15m)))) : strongObSell or flowContSell ? (useChochObPoiEntry ? (strongObSell ? selBearObBot : (not na(flowBearChosenObBot) ? flowBearChosenObBot : selBearObBot)) : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : (not na(flowBearChosenObBot) ? flowBearChosenObBot : bearObBot15m)))) : fallbackBuy ? demandIfvgEntryLevel : fallbackSell ? supplyIfvgEntryLevel : na
 entryStr = not na(entryPxForAlert) ? f_fmt(entryPxForAlert) : "na"
 rrStrAlert = not na(rrLevel) ? ("1:" + str.tostring(rrLevel, "#.##")) : "na"
 ctGateStr = ctGateLong ? "CT_LONG" : ctGateShort ? "CT_SHORT" : "OFF"

@@ -55,8 +55,16 @@ Tracks chart micro CHoCH (bullChoch15 / bearChoch15) and Lux swing BOS (tfBullBr
 ctfLongLegFull / ctfShortLegFull = that side has seen both CHoCH and BOS before the opposing swing BOS clears it.
 New input: Chart leg: bypass mixed gate if opposite leg incomplete — when your long leg is full and the short leg isn’t (or the reverse), external mixed CHoCH can still be bypassed for strong/flow so you can keep trading the initial side until the other side fully flips (both CHoCH + BOS), not on a “half” flip.
 
+- improved taking continuation moves 
+- made the chart more clean by using tooltips for details
+
 improvements. to consider
 when external gate prev is bull CHOCH + BOS. 
 Then we can allow internal entry of internal Bos plus pullback on the timeframe
 
 Also most signals need a lot of quality filtering will keep weeding out slowly
+
+- introduce liquidity sweeep concept. 
+- We are missing a good no of retest moves due to 
+the IFVG concept its also pretty acculate so can't dismiss it entirely
+
