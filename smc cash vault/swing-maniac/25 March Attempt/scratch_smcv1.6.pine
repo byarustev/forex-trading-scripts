@@ -1,0 +1,2162 @@
+//@version=5
+indicator("Swing Maniac", overlay=true, max_boxes_count=300, max_lines_count=300, max_labels_count=500, max_bars_back=5000)
+
+// -------------------------------------------------------------------------------
+// Inputs
+// -------------------------------------------------------------------------------
+groupStructure = "Structure Settings"
+swingLen = input.int(10, "Swing lookback (1H continuation)", group=groupStructure, minval=1, tooltip="Pivot length for 1H continuation OB logic only — not 4H external bias.")
+swingLenExternal4h = input.int(50, "4H external swing (major structure)", group=groupStructure, minval=5, maxval=100, tooltip="Lux-style leg length on 4H for major swings only. Drives: bias, 4H BOS/CHoCH vs external levels, and 4H origin/extreme zones. Larger = fewer, more significant breaks (external > internal noise).")
+obLookback = input.int(30, "OB Search Lookback (bars)", group=groupStructure, minval=5)
+ctfSwingLen = input.int(50, "Current TF Swing Length (Lux-style)", group=groupStructure, minval=10)
+ltfSwingLen = input.int(3, "LTF CHOCH Swing Length", group=groupStructure, minval=2)
+ltfObLookback = input.int(20, "LTF OB Search Lookback", group=groupStructure, minval=5)
+strongObArmBars = input.int(500, "Strong OB Arm Expiry (bars)", group=groupStructure, minval=10)
+flowObLookback = input.int(40, "Flow POI Opposite-Candle Lookback", group=groupStructure, minval=5, maxval=200)
+sdPivotLen = input.int(5, "Supply/Demand Pivot Length", group=groupStructure, minval=2, maxval=50)
+sdMitigationMethod = input.string("Wick", "Supply/Demand Mitigation", options=["Wick", "Close"], group=groupStructure)
+oppZoneBufferAtr = input.float(0.25, "Opposite Zone Buffer (ATR)", group=groupStructure, minval=0.0, step=0.05)
+ifvgConfirmTf = input.string("Chart", "IFVG Confirm Timeframe", options=["Chart", "1H"], group=groupStructure)
+ifvgWindowBars = input.int(7, "IFVG Confirm Window (bars)", group=groupStructure, minval=3, maxval=20)
+ifvgMinSizeAtr = input.float(0.80, "IFVG Min Size (ATR)", group=groupStructure, minval=0.0, step=0.01)
+majorIfvgMinSizeAtr = input.float(0.80, "Major IFVG Size (ATR)", group=groupStructure, minval=0.0, step=0.01)
+ifvgFallbackSwingFrac = input.float(0.30, "IFVG fallback: swing extreme zone (fraction)", group=groupStructure, minval=0.05, maxval=0.50, step=0.05, tooltip="Where the flow IFVG must *form* (touch + first FVG in window): bottom/top fraction of chart swing. Violation, retest, and entry may occur anywhere — e.g. price to EQ and back does not cancel the wait.")
+useExtMixedSellGate = input.bool(true, "External Mixed CHOCH: Gate Strong/Flow Sells", group=groupStructure)
+useExtMixedBuyGate = input.bool(true, "External Mixed CHOCH: Gate Strong/Flow Buys", group=groupStructure)
+useChartLegCommitBypass = input.bool(true, "Chart leg: bypass mixed gate if opposite leg incomplete", group=groupStructure, tooltip="Tracks chart micro CHoCH + Lux swing BOS per side. While long leg is 'full' (both seen) and short leg is not, keep allowing buys even if external mixed CHoCH would block; symmetric for sells. Opposite swing BOS clears the initial side's flags.")
+minSignalRR = input.float(2.5, "Minimum Signal RR", group=groupStructure, minval=0.1, step=0.1)
+poiRequireObFvg = input.bool(true, "POI: Require FVG after OB (chart TF)", group=groupStructure, tooltip="Swing/flow OB must see a chart-TF impulse FVG after the pivot (unless HTF exempt).")
+poiObMinFvgAtr = input.float(0.25, "POI: Min FVG gap (× ATR(14))", group=groupStructure, minval=0.0, step=0.05, tooltip="Same idea as IFVG min size: bull/bear gap must be ≥ this × ATR(14) on that bar.")
+poiFvgExemptOrigin4h = input.bool(true, "POI FVG: Exempt inside 4H Origin (also Extreme)", group=groupStructure)
+poiFvgExemptCont1h = input.bool(true, "POI FVG: Exempt inside 1H Continuation OB", group=groupStructure)
+useStrongZoneCtGate = input.bool(true, "Strong-zone counter-trend gate", group=groupStructure, tooltip="Touch Lux strong band (same geometry as Strong box): trade expansion toward weak side + pullbacks in that direction. Pauses opposing entries. Exit: weak-band touch, chart TF swing flip (strong side changes), or opposing External CHoCH (optional). Re-anchoring strong to a new level on the same side does not exit.")
+useCtGateExtChochExit = input.bool(true, "CT gate: exit on opposing External CHoCH", group=groupStructure, tooltip="On a new 4H bar: extBear CHoCH ends a long-leg gate; extBull CHoCH ends a short-leg gate.")
+
+groupDisplay = "Display"
+showStrongWeak = input.bool(true, "Show Strong/Weak Zones", group=groupDisplay)
+showSwingRange = input.bool(true, "Show Swing Zone Rectangle", group=groupDisplay)
+showSwingOBCurrentTf = input.bool(true, "Show Current TF Swing OBs", group=groupDisplay)
+swingOBCount = input.int(5, "Current TF Swing OB Count", group=groupDisplay, minval=1, maxval=20)
+useStrongObEntry = input.bool(true, "Enable Strong OB Entry", group=groupDisplay)
+entryLtfChoice = input.string("5m", "Strong OB Entry LTF", options=["5m", "15m"], group=groupDisplay)
+poiEntryModel = input.string("15m CHOCH+OB", "Strong/Flow POI Entry Model", options=["15m CHOCH+OB"], group=groupDisplay)
+showOBs = input.bool(true, "Show Order Blocks", group=groupDisplay)
+showFVGs = input.bool(true, "Show FVGs", group=groupDisplay)
+showFlowPOIs = input.bool(true, "Show Bias-Flow Continuation POIs", group=groupDisplay)
+flowPoiCount = input.int(12, "Bias-Flow POI Count", group=groupDisplay, minval=1, maxval=40)
+useFlowContEntry = input.bool(true, "Enable Bias-Flow Continuation Entry", group=groupDisplay)
+showBiasLabel = input.bool(true, "Show Bias Label", group=groupDisplay)
+showSignals = input.bool(true, "Show Entry Signals", group=groupDisplay)
+showSLTP = input.bool(false, "Show SL/TP Levels", group=groupDisplay)
+showTradeGuideLines = input.bool(true, "Show Entry/SL/TP Guide Lines", group=groupDisplay)
+tradeGuideBars = input.int(12, "Guide Line Length (bars)", group=groupDisplay, minval=2, maxval=200)
+showTriggeredPoiBoxes = input.bool(true, "Show Triggered Entry POI Boxes", group=groupDisplay)
+triggeredPoiBoxBars = input.int(40, "Triggered POI Box Length (bars)", group=groupDisplay, minval=5, maxval=500)
+showViolatedFvgBoxes = input.bool(true, "Show Violated FVG Boxes", group=groupDisplay)
+violatedFvgBoxBars = input.int(30, "Violated FVG Box Length (bars)", group=groupDisplay, minval=5, maxval=300)
+showArmDebug = input.bool(true, "Show Strong-Zone Arm Debug", group=groupDisplay)
+showPoiProximityStatus = input.bool(true, "Show POI Proximity Status", group=groupDisplay)
+poiNearBufferAtr = input.float(0.25, "POI Near Buffer (ATR)", group=groupDisplay, minval=0.0, step=0.05)
+
+// Only one supported POI entry model remains.
+useChochObPoiEntry = false
+usePoi15mIfvg = false
+usePoi15mChochOb = true
+
+groupColors = "Colors"
+colorStrong = input.color(color.new(#2962FF, 80), "Strong Zone", group=groupColors)
+colorWeak = input.color(color.new(#FF1744, 80), "Weak Zone", group=groupColors)
+colorSwingRange = input.color(color.new(#607D8B, 88), "Swing Zone Rectangle", group=groupColors)
+colorSwingRangeBorder = input.color(color.new(#FFD700, 0), "Swing Zone Border", group=groupColors)
+colorCtfSwingBullOB = input.color(color.new(#1848CC, 80), "Current TF Bullish Swing OB", group=groupColors)
+colorCtfSwingBearOB = input.color(color.new(#B22833, 80), "Current TF Bearish Swing OB", group=groupColors)
+
+colorOriginDemand = input.color(color.new(#00C853, 75), "Origin Demand OB", group=groupColors)
+colorOriginSupply = input.color(color.new(#FF6D00, 75), "Origin Supply OB", group=groupColors)
+
+colorContDemand = input.color(color.new(#FFD600, 75), "Cont. Demand OB", group=groupColors)
+colorContSupply = input.color(color.new(#FFD600, 75), "Cont. Supply OB", group=groupColors)
+
+colorExtremeDemand = input.color(color.new(#AA00FF, 75), "Extreme Demand OB", group=groupColors)
+colorExtremeSupply = input.color(color.new(#AA00FF, 75), "Extreme Supply OB", group=groupColors)
+
+colorFvgBull = input.color(color.new(#00BFA5, 85), "Bullish FVG", group=groupColors)
+colorFvgBear = input.color(color.new(#FF6F00, 85), "Bearish FVG", group=groupColors)
+
+colorBuySignal = input.color(#00E676, "Buy Signal", group=groupColors)
+colorSellSignal = input.color(#FF1744, "Sell Signal", group=groupColors)
+
+colorSL = input.color(color.new(color.red, 0), "SL Line", group=groupColors)
+colorTP1 = input.color(color.new(#FFEB3B, 0), "TP1 Line", group=groupColors)
+colorTP2 = input.color(color.new(color.lime, 0), "TP2 Line", group=groupColors)
+
+// -------------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------------
+f_zoneMid(float a, float b) =>
+    not na(a) and not na(b) ? (a + b) * 0.5 : na
+
+// Impulse FVG in [pivotBarIdx .. bar_index] (chart TF). Bull OB -> bull FVG; bear OB -> bear FVG.
+// Qualification = gap size vs ATR (poiObMinFvgAtr), same spirit as IFVG min size — not bar count.
+// Cap `off` so `high[off+2]` / `low[off+2]` never exceed bar_index (historical buffer limit).
+f_chartRangeHasQualifyingFvg(int pivotBarIdx, int obBias, float minAtrMult) =>
+    bool found = false
+    if not na(pivotBarIdx) and pivotBarIdx >= 0 and bar_index >= pivotBarIdx
+        spanRaw = math.min(500, bar_index - pivotBarIdx)
+        maxOff = bar_index >= 2 ? bar_index - 2 : 0
+        span = math.max(0, math.min(spanRaw, maxOff))
+        for off = 0 to span
+            atrOff = ta.atr(14)[off]
+            if not na(atrOff) and atrOff > 0
+                minGap = minAtrMult * atrOff
+                if obBias == 1
+                    gap = low[off] - high[off + 2]
+                    if low[off] > high[off + 2] and gap >= minGap
+                        found := true
+                else
+                    gap = low[off + 2] - high[off]
+                    if high[off] < low[off + 2] and gap >= minGap
+                        found := true
+    found
+
+// -------------------------------------------------------------------------------
+// 4H Basics: Strong/Weak swing points + BOS/ext-CHoCH signals
+// -------------------------------------------------------------------------------
+f_4hBasics(int _swingLen) =>
+    // Lux-style swing detection (leg change based), aligned with smart-money-concepts.pine.
+    // This is different from plain ta.pivot* and gives structure points the same way Lux does.
+    BULLISH_LEG = 1
+    BEARISH_LEG = 0
+
+    var float lastSwingHigh = na
+    var float lastSwingLow = na
+    var int lastSwingHighTime = na
+    var int lastSwingLowTime = na
+    var int legState = 0
+
+    newLegHigh = high[_swingLen] > ta.highest(_swingLen)
+    newLegLow = low[_swingLen] < ta.lowest(_swingLen)
+
+    if newLegHigh
+        legState := BEARISH_LEG
+    else if newLegLow
+        legState := BULLISH_LEG
+
+    newPivot = ta.change(legState) != 0
+    pivotLow = ta.change(legState) == 1
+    pivotHigh = ta.change(legState) == -1
+
+    if newPivot
+        if pivotLow
+            lastSwingLow := low[_swingLen]
+            lastSwingLowTime := time[_swingLen]
+        else if pivotHigh
+            lastSwingHigh := high[_swingLen]
+            lastSwingHighTime := time[_swingLen]
+
+    swHigh = lastSwingHigh
+    swLow = lastSwingLow
+    swHighTime = lastSwingHighTime
+    swLowTime = lastSwingLowTime
+
+    bullBOS = not na(swHigh) and close > swHigh and close[1] <= swHigh
+    bearBOS = not na(swLow) and close < swLow and close[1] >= swLow
+
+    // ext-CHoCH: sweep beyond the significant swing level but close back (no BOS on this bar)
+    extChochBull = not bullBOS and not na(swLow) and low < swLow and close > swLow
+    extChochBear = not bearBOS and not na(swHigh) and high > swHigh and close < swHigh
+
+    [swHigh, swLow, swHighTime, swLowTime, bullBOS, bearBOS, extChochBull, extChochBear]
+
+[swHigh4H, swLow4H, swHighTime4H, swLowTime4H, bullBOS4H, bearBOS4H, extBull4H, extBear4H] = request.security(syminfo.tickerid, "240", f_4hBasics(swingLenExternal4h), lookahead=barmerge.lookahead_off)
+
+// 4H close for immediate strong-level invalidation rule
+htfClose4H = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+
+// -------------------------------------------------------------------------------
+// Bias engine (4H EXTERNAL only) — major swing structure
+// -------------------------------------------------------------------------------
+// Uses swingLenExternal4h (large leg) so bias follows major BOS on 4H, not short internal
+// swings. Internal chart structure is tfSwingTrendBias / ctfSwingLen — separate from this.
+var int bias = 0  // 1 bullish | -1 bearish | 0 neutral
+
+var float strongLowLevel = na
+var float strongHighLevel = na
+
+var bool extChochWarning = false
+new4HBar = ta.change(time("240"))
+if new4HBar
+    // External 4H: BOS only when close breaks last *major* Lux-style swing high/low (f_4hBasics(swingLenExternal4h)).
+    if bullBOS4H
+        bias := 1
+        strongLowLevel := swLow4H
+    else if bearBOS4H
+        bias := -1
+        strongHighLevel := swHigh4H
+
+    // Keep warning purely informational; it does not change external bias.
+    extChochWarning := (extBull4H and bias != 1) or (extBear4H and bias != -1)
+
+// External 4H CHOCH tracking: while external bull CHOCH has printed but external bear CHOCH has not yet,
+// block strong/flow sells (IFVG fallback sells still allowed). After bear CHOCH, allow sells + buys until bear BOS resets.
+var bool extSeenBullChoch = false
+var bool extSeenBearChoch = false
+if new4HBar
+    if extBull4H
+        extSeenBullChoch := true
+    if extBear4H
+        extSeenBearChoch := true
+    // Any external BOS starts a fresh phase.
+    if bearBOS4H or bullBOS4H
+        extSeenBullChoch := false
+        extSeenBearChoch := false
+
+extMixedBothChoch = extSeenBullChoch and extSeenBearChoch
+blockStrongFlowSellsMixed = useExtMixedSellGate and extSeenBullChoch and not extSeenBearChoch
+blockStrongFlowBuysMixed = useExtMixedBuyGate and extSeenBearChoch and not extSeenBullChoch
+
+// -------------------------------------------------------------------------------
+// Visuals: Strong/Weak boxes + bias + premium/discount label
+// (Signals/OBs will be added in subsequent iterations)
+// -------------------------------------------------------------------------------
+var box strongBox = na
+var box weakBox = na
+var box swingRangeBox = na
+var label swingWeakSideLbl = na
+var label swingStrongSideLbl = na
+var label biasLbl = na
+var label priceLbl = na
+
+priceLocText = "Analysing..."
+
+// Lux-style swing extremes on the *current chart timeframe*:
+// This is what SMC uses for High/Low swings and the "Strong/Weak" wording.
+// We use trailing.top/trailing.bottom (updated cumulatively) rather than fixed pivot points.
+var int tfLeg = 0
+var float tfSwingHigh = na
+var float tfSwingLow = na
+var int tfSwingHighBarIndex = na
+var int tfSwingLowBarIndex = na
+var bool tfSwingHighCrossed = false
+var bool tfSwingLowCrossed = false
+var int tfSwingTrendBias = 0 // +1 bullish, -1 bearish
+
+// Strong-zone counter-trend gate state (logic updates after tfSwingTrendBias / trailing extremes)
+var bool ctGateActive = false
+var int ctGateDir = 0  // 1 = long-leg (from strong demand), -1 = short-leg (from strong supply)
+var int ctArmedTfSwingBias = 0
+
+var float tfTrailingTop = na
+var float tfTrailingBottom = na
+var int tfTrailingBarTime = na
+var int tfTrailingLastTopTime = na
+var int tfTrailingLastBottomTime = na
+
+CT_BULLISH_LEG = 1
+CT_BEARISH_LEG = 0
+
+// Same "leg" logic used by Lux getCurrentStructure().
+// Note: use dedicated current-timeframe swing length (default 50) to match SMC behavior.
+tfNewLegHigh = high[ctfSwingLen] > ta.highest(ctfSwingLen)
+tfNewLegLow = low[ctfSwingLen] < ta.lowest(ctfSwingLen)
+if tfNewLegHigh
+    tfLeg := CT_BEARISH_LEG
+else if tfNewLegLow
+    tfLeg := CT_BULLISH_LEG
+
+tfLegChange = ta.change(tfLeg)
+tfNewPivot = tfLegChange != 0
+tfPivotLow = tfLegChange == 1
+tfPivotHigh = tfLegChange == -1
+
+if tfNewPivot
+    if tfPivotLow
+        tfSwingLow := low[ctfSwingLen]
+        tfSwingLowBarIndex := bar_index[ctfSwingLen]
+        tfSwingLowCrossed := false
+        tfTrailingBottom := tfSwingLow
+        tfTrailingBarTime := time[ctfSwingLen]
+        tfTrailingLastBottomTime := time[ctfSwingLen]
+    else if tfPivotHigh
+        tfSwingHigh := high[ctfSwingLen]
+        tfSwingHighBarIndex := bar_index[ctfSwingLen]
+        tfSwingHighCrossed := false
+        tfTrailingTop := tfSwingHigh
+        tfTrailingBarTime := time[ctfSwingLen]
+        tfTrailingLastTopTime := time[ctfSwingLen]
+
+// Same trailing-extremes behavior as Lux updateTrailingExtremes().
+if na(tfTrailingTop)
+    tfTrailingTop := high
+if na(tfTrailingBottom)
+    tfTrailingBottom := low
+tfTrailingTop := math.max(high, tfTrailingTop)
+if tfTrailingTop == high
+    tfTrailingLastTopTime := time
+tfTrailingBottom := math.min(low, tfTrailingBottom)
+if tfTrailingBottom == low
+    tfTrailingLastBottomTime := time
+
+// Premium/Discount must be based on the full current swing zone (top/bottom split in half).
+swingZoneMid = f_zoneMid(tfTrailingTop, tfTrailingBottom)
+priceLocText := not na(swingZoneMid) ? (close > swingZoneMid ? "Price in PREMIUM -> Weak Zone" : "Price in DISCOUNT -> Strong Zone") : "Analysing..."
+
+// Same swing bias update pattern as Lux displayStructure().
+tfBullBreak = ta.crossover(close, tfSwingHigh) and not tfSwingHighCrossed and not na(tfSwingHigh)
+tfBearBreak = ta.crossunder(close, tfSwingLow) and not tfSwingLowCrossed and not na(tfSwingLow)
+if tfBullBreak
+    tfSwingTrendBias := 1
+    tfSwingHighCrossed := true
+if tfBearBreak
+    tfSwingTrendBias := -1
+    tfSwingLowCrossed := true
+
+// Counter-trend gate: Lux strong-band touch -> trade leg toward weak side; pause opposing signals.
+// Same band geometry as Strong box (pad = mintick*10). Exit: weak touch, chart TF swing flip, or optional opposing ext-CHoCH.
+ctPad = syminfo.mintick * 10
+swingStrongLvl = not na(tfTrailingTop) and not na(tfTrailingBottom) ? (tfSwingTrendBias == -1 ? tfTrailingTop : tfTrailingBottom) : na
+swingWeakLvl = not na(tfTrailingTop) and not na(tfTrailingBottom) ? (tfSwingTrendBias == -1 ? tfTrailingBottom : tfTrailingTop) : na
+ctTouchStrongBand = useStrongZoneCtGate and not na(swingStrongLvl) and high >= swingStrongLvl - ctPad and low <= swingStrongLvl + ctPad
+ctTouchWeakBand = useStrongZoneCtGate and not na(swingWeakLvl) and high >= swingWeakLvl - ctPad and low <= swingWeakLvl + ctPad
+
+if not useStrongZoneCtGate and ctGateActive
+    ctGateActive := false
+    ctGateDir := 0
+    ctArmedTfSwingBias := 0
+
+if useStrongZoneCtGate and ctGateActive
+    ctExitWeak = ctTouchWeakBand
+    ctExitTfFlip = tfSwingTrendBias != ctArmedTfSwingBias
+    ctExitExt = useCtGateExtChochExit and new4HBar and ((ctGateDir == 1 and extBear4H) or (ctGateDir == -1 and extBull4H))
+    if ctExitWeak or ctExitTfFlip or ctExitExt
+        ctGateActive := false
+        ctGateDir := 0
+        ctArmedTfSwingBias := 0
+
+if useStrongZoneCtGate and not ctGateActive and tfSwingTrendBias != 0
+    if tfSwingTrendBias == 1 and ctTouchStrongBand
+        ctGateActive := true
+        ctGateDir := 1
+        ctArmedTfSwingBias := tfSwingTrendBias
+    else if tfSwingTrendBias == -1 and ctTouchStrongBand
+        ctGateActive := true
+        ctGateDir := -1
+        ctArmedTfSwingBias := tfSwingTrendBias
+
+ctGateLong = useStrongZoneCtGate and ctGateActive and ctGateDir == 1
+ctGateShort = useStrongZoneCtGate and ctGateActive and ctGateDir == -1
+
+// ------------------------------------------------------------------------------
+// Current TF swing order blocks (Lux-style store/draw concept)
+// ------------------------------------------------------------------------------
+// Volatility parsing similar to Lux to avoid using extreme volatile candles directly.
+ctfAtr200 = ta.atr(200)
+ctfHighVol = not na(ctfAtr200) and ctfAtr200 > 0 and (high - low) >= (2.0 * ctfAtr200)
+ctfParsedHigh = ctfHighVol ? low : high
+ctfParsedLow = ctfHighVol ? high : low
+
+var array<float> ctfParsedHighs = array.new_float()
+var array<float> ctfParsedLows = array.new_float()
+var array<int> ctfTimes = array.new_int()
+
+array.push(ctfParsedHighs, ctfParsedHigh)
+array.push(ctfParsedLows, ctfParsedLow)
+array.push(ctfTimes, time)
+
+if array.size(ctfParsedHighs) > 3000
+    array.shift(ctfParsedHighs)
+    array.shift(ctfParsedLows)
+    array.shift(ctfTimes)
+
+// OB storage arrays
+var array<float> ctfObTops = array.new_float()
+var array<float> ctfObBots = array.new_float()
+var array<int> ctfObTimes = array.new_int()
+var array<int> ctfObBias = array.new_int() // +1 bullish OB, -1 bearish OB
+var array<int> ctfObPivotBar = array.new_int()
+var array<bool> ctfObFvgOk = array.new_bool()
+
+// Bias-flow continuation POIs (footprint OBs formed during external-bias continuation).
+var array<float> flowObTops = array.new_float()
+var array<float> flowObBots = array.new_float()
+var array<int> flowObTimes = array.new_int()
+var array<int> flowObBias = array.new_int() // +1 demand, -1 supply
+var array<int> flowObPivotBar = array.new_int()
+var array<bool> flowObFvgOk = array.new_bool()
+var int sdOs = 0
+
+f_storeCtfSwingOb(int pivotBarIdx, int obBias) =>
+    if not na(pivotBarIdx)
+        // Scan from pivot bar to current bar; limit scan depth for performance.
+        maxScan = 500
+        float bestTop = na
+        float bestBot = na
+        int bestTime = na
+        found = false
+        for off = 0 to maxScan
+            idx = bar_index - off
+            if idx < pivotBarIdx
+                break
+            if off < array.size(ctfParsedHighs)
+                pH = array.get(ctfParsedHighs, array.size(ctfParsedHighs) - 1 - off)
+                pL = array.get(ctfParsedLows, array.size(ctfParsedLows) - 1 - off)
+                pT = array.get(ctfTimes, array.size(ctfTimes) - 1 - off)
+                if obBias == 1
+                    // Bullish OB picks the minimum parsed low from pivot->break range.
+                    if not found or pL < bestBot
+                        bestTop := pH
+                        bestBot := pL
+                        bestTime := pT
+                        found := true
+                else
+                    // Bearish OB picks the maximum parsed high from pivot->break range.
+                    if not found or pH > bestTop
+                        bestTop := pH
+                        bestBot := pL
+                        bestTime := pT
+                        found := true
+        if found and not na(bestTop) and not na(bestBot) and bestTop > bestBot
+            fvgOk = not poiRequireObFvg or f_chartRangeHasQualifyingFvg(pivotBarIdx, obBias, poiObMinFvgAtr)
+            array.unshift(ctfObTops, bestTop)
+            array.unshift(ctfObBots, bestBot)
+            array.unshift(ctfObTimes, bestTime)
+            array.unshift(ctfObBias, obBias)
+            array.unshift(ctfObPivotBar, pivotBarIdx)
+            array.unshift(ctfObFvgOk, fvgOk)
+            if array.size(ctfObTops) > 100
+                array.pop(ctfObTops)
+                array.pop(ctfObBots)
+                array.pop(ctfObTimes)
+                array.pop(ctfObBias)
+                array.pop(ctfObPivotBar)
+                array.pop(ctfObFvgOk)
+
+// On swing structure breaks, store swing OBs like Lux storeOrdeBlock().
+if tfBullBreak
+    f_storeCtfSwingOb(tfSwingHighBarIndex, 1)
+if tfBearBreak
+    f_storeCtfSwingOb(tfSwingLowBarIndex, -1)
+
+// Current-timeframe Supply/Demand zone detection (Lux-style OB detector concept).
+sdUpper = ta.highest(sdPivotLen)
+sdLower = ta.lowest(sdPivotLen)
+sdOs := high[sdPivotLen] > sdUpper ? 0 : low[sdPivotLen] < sdLower ? 1 : nz(sdOs[1], sdOs)
+sdPhv = ta.pivothigh(volume, sdPivotLen, sdPivotLen)
+
+newDemandZone = sdPhv and sdOs == 1
+newSupplyZone = sdPhv and sdOs == 0
+
+if newDemandZone
+    zoneTop = hl2[sdPivotLen]
+    zoneBot = low[sdPivotLen]
+    zoneTime = time[sdPivotLen]
+    if zoneTop > zoneBot
+        dupDemand = false
+        if array.size(flowObTimes) > 0 and array.size(flowObBias) > 0
+            dupDemand := array.get(flowObTimes, 0) == zoneTime and array.get(flowObBias, 0) == 1
+        if not dupDemand
+            pivotBar = bar_index - sdPivotLen
+            fvgOk = not poiRequireObFvg or f_chartRangeHasQualifyingFvg(pivotBar, 1, poiObMinFvgAtr)
+            array.unshift(flowObTops, zoneTop)
+            array.unshift(flowObBots, zoneBot)
+            array.unshift(flowObTimes, zoneTime)
+            array.unshift(flowObBias, 1)
+            array.unshift(flowObPivotBar, pivotBar)
+            array.unshift(flowObFvgOk, fvgOk)
+            if array.size(flowObTops) > 160
+                array.pop(flowObTops)
+                array.pop(flowObBots)
+                array.pop(flowObTimes)
+                array.pop(flowObBias)
+                array.pop(flowObPivotBar)
+                array.pop(flowObFvgOk)
+
+if newSupplyZone
+    zoneTop = high[sdPivotLen]
+    zoneBot = hl2[sdPivotLen]
+    zoneTime = time[sdPivotLen]
+    if zoneTop > zoneBot
+        dupSupply = false
+        if array.size(flowObTimes) > 0 and array.size(flowObBias) > 0
+            dupSupply := array.get(flowObTimes, 0) == zoneTime and array.get(flowObBias, 0) == -1
+        if not dupSupply
+            pivotBar = bar_index - sdPivotLen
+            fvgOk = not poiRequireObFvg or f_chartRangeHasQualifyingFvg(pivotBar, -1, poiObMinFvgAtr)
+            array.unshift(flowObTops, zoneTop)
+            array.unshift(flowObBots, zoneBot)
+            array.unshift(flowObTimes, zoneTime)
+            array.unshift(flowObBias, -1)
+            array.unshift(flowObPivotBar, pivotBar)
+            array.unshift(flowObFvgOk, fvgOk)
+            if array.size(flowObTops) > 160
+                array.pop(flowObTops)
+                array.pop(flowObBots)
+                array.pop(flowObTimes)
+                array.pop(flowObBias)
+                array.pop(flowObPivotBar)
+                array.pop(flowObFvgOk)
+
+// Mitigation: remove OB when price fully crosses it in the opposite direction.
+ctfObSizeMit = math.min(math.min(math.min(math.min(math.min(array.size(ctfObTops), array.size(ctfObBots)), array.size(ctfObTimes)), array.size(ctfObBias)), array.size(ctfObPivotBar)), array.size(ctfObFvgOk))
+i = ctfObSizeMit - 1
+while i >= 0
+    obTop = array.get(ctfObTops, i)
+    obBot = array.get(ctfObBots, i)
+    obB = array.get(ctfObBias, i)
+    mitigated = (obB == 1 and low <= obBot) or (obB == -1 and high >= obTop)
+    if mitigated
+        array.remove(ctfObTops, i)
+        array.remove(ctfObBots, i)
+        array.remove(ctfObTimes, i)
+        array.remove(ctfObBias, i)
+        array.remove(ctfObPivotBar, i)
+        array.remove(ctfObFvgOk, i)
+    i := i - 1
+
+// Mitigate supply/demand zones using wick/close logic (reference-aligned).
+sdTargetBull = sdMitigationMethod == "Close" ? ta.lowest(close, sdPivotLen) : ta.lowest(low, sdPivotLen)
+sdTargetBear = sdMitigationMethod == "Close" ? ta.highest(close, sdPivotLen) : ta.highest(high, sdPivotLen)
+flowObSizeMit = math.min(math.min(math.min(math.min(math.min(array.size(flowObTops), array.size(flowObBots)), array.size(flowObTimes)), array.size(flowObBias)), array.size(flowObPivotBar)), array.size(flowObFvgOk))
+kFlow = flowObSizeMit - 1
+while kFlow >= 0
+    flowTopK = array.get(flowObTops, kFlow)
+    flowBotK = array.get(flowObBots, kFlow)
+    flowBiasK = array.get(flowObBias, kFlow)
+    mitigatedFlow = (flowBiasK == 1 and sdTargetBull < flowBotK) or (flowBiasK == -1 and sdTargetBear > flowTopK)
+    if mitigatedFlow
+        array.remove(flowObTops, kFlow)
+        array.remove(flowObBots, kFlow)
+        array.remove(flowObTimes, kFlow)
+        array.remove(flowObBias, kFlow)
+        array.remove(flowObPivotBar, kFlow)
+        array.remove(flowObFvgOk, kFlow)
+    kFlow := kFlow - 1
+
+if barstate.islast
+    if not na(strongBox)
+        box.delete(strongBox)
+    if not na(weakBox)
+        box.delete(weakBox)
+    if not na(swingRangeBox)
+        box.delete(swingRangeBox)
+    if not na(swingWeakSideLbl)
+        label.delete(swingWeakSideLbl)
+    if not na(swingStrongSideLbl)
+        label.delete(swingStrongSideLbl)
+    strongBox := na
+    weakBox := na
+    swingRangeBox := na
+    swingWeakSideLbl := na
+    swingStrongSideLbl := na
+
+    pad = syminfo.mintick * 10
+    // Swing zone rectangle based on Lux trailing extremes of the CURRENT timeframe.
+    // Strong/Weak wording uses Lux logic:
+    //  - top label: swingTrend.bias == BEARISH ? Strong High : Weak High
+    //  - bottom label: swingTrend.bias == BULLISH ? Strong Low : Weak Low
+    if showSwingRange and not na(tfTrailingBottom) and not na(tfTrailingTop)
+        // Lux/SMC uses `trailing.barTime` as the zone's left anchor.
+        int leftTime = tfTrailingBarTime
+        swingRangeBox := box.new(leftTime, tfTrailingTop, time, tfTrailingBottom, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorSwingRange, border_color=colorSwingRangeBorder, border_width=2, text="Swing Zone", text_color=color.white, text_size=size.tiny)
+
+        string topTxtLux = tfSwingTrendBias == -1 ? "Strong High" : "Weak High"
+        string botTxtLux = tfSwingTrendBias == 1 ? "Strong Low" : "Weak Low"
+
+        swingWeakSideLbl := label.new(bar_index, tfTrailingTop, topTxtLux, style=label.style_label_down, color=color.new(colorSwingRangeBorder, 0), textcolor=color.black, size=size.tiny)
+        swingStrongSideLbl := label.new(bar_index, tfTrailingBottom, botTxtLux, style=label.style_label_up, color=color.new(colorSwingRangeBorder, 0), textcolor=color.black, size=size.tiny)
+
+    if showStrongWeak and not na(tfTrailingBottom) and not na(tfTrailingTop)
+        strongLevel = tfSwingTrendBias == -1 ? tfTrailingTop : tfTrailingBottom
+        weakLevel = tfSwingTrendBias == -1 ? tfTrailingBottom : tfTrailingTop
+        strongBox := box.new(nz(tfTrailingBarTime, time), strongLevel + pad, time, strongLevel - pad, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorStrong, border_color=colorStrong, border_width=1, text="Strong", text_color=color.white, text_size=size.tiny)
+        weakBox := box.new(nz(tfTrailingBarTime, time), weakLevel + pad, time, weakLevel - pad, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorWeak, border_color=colorWeak, border_width=1, text="Weak", text_color=color.white, text_size=size.tiny)
+
+    // Draw current-TF swing OBs; strong-side OB is tagged as POI.
+    ctfObSizeDraw = math.min(math.min(math.min(math.min(math.min(array.size(ctfObTops), array.size(ctfObBots)), array.size(ctfObTimes)), array.size(ctfObBias)), array.size(ctfObPivotBar)), array.size(ctfObFvgOk))
+    if showSwingOBCurrentTf and ctfObSizeDraw > 0
+        drawN = math.min(swingOBCount, ctfObSizeDraw)
+        for j = 0 to drawN - 1
+            obTop = array.get(ctfObTops, j)
+            obBot = array.get(ctfObBots, j)
+            obTime = array.get(ctfObTimes, j)
+            obB = array.get(ctfObBias, j)
+            obBorderColor = obB == 1 ? color.new(color.blue, 0) : color.new(color.red, 0)
+            obBgColor = color.new(obBorderColor, 100)
+            strongSideOb = (tfSwingTrendBias == 1 and obB == 1) or (tfSwingTrendBias == -1 and obB == -1)
+            obText = obB == 1 ? "Swing Bull OB" : "Swing Bear OB"
+            obText := strongSideOb ? (obText + " (Strong-side POI)") : obText
+            box.new(obTime, obTop, time, obBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=obBgColor, border_color=obBorderColor, border_width=1, text=obText, text_color=color.white, text_size=size.tiny)
+
+    flowObSizeDraw = math.min(math.min(math.min(math.min(math.min(array.size(flowObTops), array.size(flowObBots)), array.size(flowObTimes)), array.size(flowObBias)), array.size(flowObPivotBar)), array.size(flowObFvgOk))
+    if showFlowPOIs and flowObSizeDraw > 0
+        flowDrawN = math.min(flowPoiCount, flowObSizeDraw)
+        for j = 0 to flowDrawN - 1
+            fTop = array.get(flowObTops, j)
+            fBot = array.get(flowObBots, j)
+            fTime = array.get(flowObTimes, j)
+            fBias = array.get(flowObBias, j)
+            fBorder = fBias == 1 ? color.new(color.blue, 0) : color.new(color.red, 0)
+            fBg = color.new(fBorder, 88)
+            fText = fBias == 1 ? "Demand Zone (Flow)" : "Supply Zone (Flow)"
+            box.new(fTime, fTop, time, fBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=fBg, border_color=fBorder, border_width=1, text=fText, text_color=color.white, text_size=size.tiny)
+
+    if showBiasLabel
+        biasText = bias == 1 ? "* BULLISH BIAS" : bias == -1 ? "* BEARISH BIAS" : "* NEUTRAL"
+        warnTxt = extChochWarning ? " ! Ext. CHoCH" : ""
+        biasColorLbl = bias == 1 ? color.new(color.green, 0) : bias == -1 ? color.new(color.red, 0) : color.gray
+        zoneBiasY = not na(tfTrailingTop) and not na(tfTrailingBottom) ? (tfTrailingTop - (tfTrailingTop - tfTrailingBottom) * 0.18) : na
+        yBias = not na(zoneBiasY) ? zoneBiasY : (high + ta.atr(14) * 2.5)
+        if na(biasLbl)
+            biasLbl := label.new(bar_index, yBias, biasText + warnTxt, style=label.style_label_left, color=biasColorLbl, textcolor=color.white, size=size.normal)
+        else
+            label.set_xy(biasLbl, bar_index, yBias)
+            label.set_text(biasLbl, biasText + warnTxt)
+            label.set_color(biasLbl, biasColorLbl)
+    else
+        if not na(biasLbl)
+            label.delete(biasLbl)
+            biasLbl := na
+
+    zonePriceY = not na(tfTrailingTop) and not na(tfTrailingBottom) ? f_zoneMid(tfTrailingTop, tfTrailingBottom) : na
+    yPrice = not na(zonePriceY) ? zonePriceY : (high + ta.atr(14) * 4.0)
+    if na(priceLbl)
+        priceLbl := label.new(bar_index, yPrice, priceLocText, style=label.style_label_left, color=color.new(color.gray, 80), textcolor=color.white, size=size.small)
+    else
+        label.set_xy(priceLbl, bar_index, yPrice)
+        label.set_text(priceLbl, priceLocText)
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MTF POIs + 15M CHoCH signals
+// (4H = bias + swing OBs/extreme, 1H = continuation OB + FVG, 15M = CHoCH trigger)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Helpers for OB math
+f_isBullishCandle(float o, float c) => c > o
+f_isBearishCandle(float o, float c) => c < o
+f_bodyTop(float o, float c) => math.max(o, c)
+f_bodyBot(float o, float c) => math.min(o, c)
+f_mid(float a, float b) => not na(a) and not na(b) ? (a + b) * 0.5 : na
+f_fmt(float x) => str.tostring(x, format.mintick)
+
+// Chart POI zone [aLow,aHigh] vs 15m FVG [bLow,bHigh] (each pair may be high/low unordered)
+f_rangesOverlap(float a1, float a2, float b1, float b2) =>
+    aHi = math.max(a1, a2)
+    aLo = math.min(a1, a2)
+    bHi = math.max(b1, b2)
+    bLo = math.min(b1, b2)
+    not na(aHi) and not na(aLo) and not na(bHi) and not na(bLo) and aLo <= bHi and bLo <= aHi
+
+// IFVG confirmation:
+// - Bull setup needs violation of bearish FVG.
+// - Bear setup needs violation of bullish FVG.
+f_ifvgViolation() =>
+    fvgAtr = ta.atr(14)
+    minFvgSize = fvgAtr * ifvgMinSizeAtr
+    bearGap = low[2] - high
+    bullGap = low - high[2]
+    bearFvg = high < low[2] and bearGap >= minFvgSize
+    bullFvg = low > high[2] and bullGap >= minFvgSize
+    var float lastBearTop = na
+    var float lastBearBot = na
+    var float lastBullTop = na
+    var float lastBullBot = na
+    if bearFvg
+        lastBearTop := low[2]
+        lastBearBot := high
+    if bullFvg
+        lastBullTop := low
+        lastBullBot := high[2]
+    violateBearFvg = not na(lastBearTop) and close > lastBearTop and close[1] <= lastBearTop
+    violateBullFvg = not na(lastBullBot) and close < lastBullBot and close[1] >= lastBullBot
+    [bearFvg, bullFvg, violateBearFvg, violateBullFvg, lastBearTop, lastBearBot, lastBullTop, lastBullBot]
+
+// LTF entry engine:
+// 1) detect CHOCH on selected LTF
+// 2) cache the OB that formed with the CHOCH impulse
+// 3) fire entry only when price retests that OB
+f_ltfChochRetestEngine(int _len, int _obLookback) =>
+    var float ltfSwingHigh = na
+    var float ltfSwingLow = na
+    var float bullObTop = na
+    var float bullObBot = na
+    var float bearObTop = na
+    var float bearObBot = na
+    var bool waitBullRetest = false
+    var bool waitBearRetest = false
+
+    ph = ta.pivothigh(high, _len, _len)
+    pl = ta.pivotlow(low, _len, _len)
+    if not na(ph)
+        ltfSwingHigh := ph
+    if not na(pl)
+        ltfSwingLow := pl
+
+    bullChoch = not na(ltfSwingHigh) and ta.crossover(close, ltfSwingHigh)
+    bearChoch = not na(ltfSwingLow) and ta.crossunder(close, ltfSwingLow)
+
+    // Cache OB at CHOCH creation
+    if bullChoch
+        int idxBull = na
+        for i = 1 to _obLookback
+            if na(idxBull) and close[i] < open[i]
+                idxBull := i
+        if not na(idxBull)
+            bullObTop := high[idxBull]
+            bullObBot := low[idxBull]
+            waitBullRetest := true
+
+    if bearChoch
+        int idxBear = na
+        for i = 1 to _obLookback
+            if na(idxBear) and close[i] > open[i]
+                idxBear := i
+        if not na(idxBear)
+            bearObTop := high[idxBear]
+            bearObBot := low[idxBear]
+            waitBearRetest := true
+
+    bullRetestEntry = waitBullRetest and not na(bullObTop) and not na(bullObBot) and low <= bullObTop and high >= bullObBot
+    bearRetestEntry = waitBearRetest and not na(bearObTop) and not na(bearObBot) and high >= bearObBot and low <= bearObTop
+
+    if bullRetestEntry
+        waitBullRetest := false
+    if bearRetestEntry
+        waitBearRetest := false
+
+    [bullChoch, bearChoch, bullObTop, bullObBot, bearObTop, bearObBot, bullRetestEntry, bearRetestEntry]
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 4H Order Blocks (Origin + Extreme)
+// ──────────────────────────────────────────────────────────────────────────────
+f_4hOBs(int _swingLen, int _obLookback) =>
+    var float lastSwingHigh = na
+    var float lastSwingLow = na
+    var int lastSwingHighTime = na
+    var int lastSwingLowTime = na
+
+    ph = ta.pivothigh(high, _swingLen, _swingLen)
+    pl = ta.pivotlow(low, _swingLen, _swingLen)
+
+    if not na(ph)
+        lastSwingHigh := ph
+        lastSwingHighTime := time[_swingLen]
+    if not na(pl)
+        lastSwingLow := pl
+        lastSwingLowTime := time[_swingLen]
+
+    swHigh = lastSwingHigh
+    swLow = lastSwingLow
+
+    bullBOS = not na(swHigh) and close > swHigh and close[1] <= swHigh
+    bearBOS = not na(swLow) and close < swLow and close[1] >= swLow
+
+    k = math.min(_obLookback, math.max(bar_index, 1))
+
+    // Origin Demand/Supply
+    float odBT = na
+    float odBB = na
+    float odLow = na
+    float odHigh = na
+    float osBT = na
+    float osBB = na
+    float osLow = na
+    float osHigh = na
+
+    // Extreme Demand/Supply
+    float exDBT = na
+    float exDBB = na
+    float exDLow = na
+    float exDHigh = na
+    float exSBT = na
+    float exSBB = na
+    float exSLow = na
+    float exSHigh = na
+
+    int bullBosTime = na
+    int bearBosTime = na
+
+    if bullBOS
+        bullBosTime := time
+
+        // Origin Demand: last bearish candle before BOS
+        for i = 1 to k
+            if f_isBearishCandle(open[i], close[i])
+                odBT := f_bodyTop(open[i], close[i])
+                odBB := f_bodyBot(open[i], close[i])
+                odLow := low[i]
+                odHigh := high[i]
+                break
+
+        // Extreme Demand: deepest bearish candle (lowest body bottom)
+        for i = 1 to k
+            if f_isBearishCandle(open[i], close[i])
+                bBT = f_bodyTop(open[i], close[i])
+                bBB = f_bodyBot(open[i], close[i])
+                if na(exDBB) or bBB < exDBB
+                    exDBT := bBT
+                    exDBB := bBB
+                    exDLow := low[i]
+                    exDHigh := high[i]
+
+    if bearBOS
+        bearBosTime := time
+
+        // Origin Supply: last bullish candle before BOS
+        for i = 1 to k
+            if f_isBullishCandle(open[i], close[i])
+                osBT := f_bodyTop(open[i], close[i])
+                osBB := f_bodyBot(open[i], close[i])
+                osLow := low[i]
+                osHigh := high[i]
+                break
+
+        // Extreme Supply: highest bullish candle (highest body top)
+        for i = 1 to k
+            if f_isBullishCandle(open[i], close[i])
+                bBT = f_bodyTop(open[i], close[i])
+                bBB = f_bodyBot(open[i], close[i])
+                if na(exSBT) or bBT > exSBT
+                    exSBT := bBT
+                    exSBB := bBB
+                    exSLow := low[i]
+                    exSHigh := high[i]
+
+    [odBT, odBB, odLow, odHigh, osBT, osBB, osLow, osHigh, exDBT, exDBB, exDLow, exDHigh, exSBT, exSBB, exSLow, exSHigh, bullBosTime, bearBosTime]
+
+[odBT4H, odBB4H, odLow4H, odHigh4H, osBT4H, osBB4H, osLow4H, osHigh4H, exDBT4H, exDBB4H, exDLow4H, exDHigh4H, exSBT4H, exSBB4H, exSLow4H, exSHigh4H, bullBosTimeOb4H, bearBosTimeOb4H] = request.security(syminfo.tickerid, "240", f_4hOBs(swingLen, obLookback), lookahead=barmerge.lookahead_off)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 1H Continuation OB + FVG (Type 2)
+// ──────────────────────────────────────────────────────────────────────────────
+f_1hCont(int _swingLen, int _obLookback) =>
+    ph = ta.pivothigh(high, _swingLen, _swingLen)
+    pl = ta.pivotlow(low, _swingLen, _swingLen)
+
+    var float lastSwingHigh = na
+    var float lastSwingLow = na
+
+    if not na(ph)
+        lastSwingHigh := ph
+    if not na(pl)
+        lastSwingLow := pl
+
+    bullBOS = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+    bearBOS = not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+
+    k = math.min(_obLookback, math.max(bar_index, 1))
+
+    // Continuation Demand
+    bool cdFound = false
+    float cdBT = na
+    float cdBB = na
+    float cdLow = na
+    float cdHigh = na
+    float cdFvgTop = na
+    float cdFvgBot = na
+    int cdBornTime = na
+
+    // Continuation Supply
+    bool csFound = false
+    float csBT = na
+    float csBB = na
+    float csLow = na
+    float csHigh = na
+    float csFvgTop = na
+    float csFvgBot = na
+    int csBornTime = na
+
+    if bullBOS
+        for i = 1 to k
+            if f_isBearishCandle(open[i], close[i])
+                // next candle closes above the bearish body
+                nextClosesAbove = close[i - 1] > f_bodyTop(open[i], close[i])
+                // bullish FVG exists nearby
+                fvgOk = (i + 2 <= k) and (low[i] > high[i + 2])
+                if nextClosesAbove and fvgOk
+                    cdBT := f_bodyTop(open[i], close[i])
+                    cdBB := f_bodyBot(open[i], close[i])
+                    cdLow := low[i]
+                    cdHigh := high[i]
+                    cdFvgTop := low[i]
+                    cdFvgBot := high[i + 2]
+                    cdBornTime := time[i]
+                    cdFound := true
+                    break
+
+    if bearBOS
+        for i = 1 to k
+            if f_isBullishCandle(open[i], close[i])
+                nextClosesBelow = close[i - 1] < f_bodyBot(open[i], close[i])
+                fvgOk = (i + 2 <= k) and (high[i] < low[i + 2])
+                if nextClosesBelow and fvgOk
+                    csBT := f_bodyTop(open[i], close[i])
+                    csBB := f_bodyBot(open[i], close[i])
+                    csLow := low[i]
+                    csHigh := high[i]
+                    csFvgTop := low[i + 2]
+                    csFvgBot := high[i]
+                    csBornTime := time[i]
+                    csFound := true
+                    break
+
+    [cdFound, cdBT, cdBB, cdLow, cdHigh, cdFvgTop, cdFvgBot, cdBornTime, csFound, csBT, csBB, csLow, csHigh, csFvgTop, csFvgBot, csBornTime]
+
+[cdFound1H, cdBT1H, cdBB1H, cdLow1H, cdHigh1H, cdFvgTop1H, cdFvgBot1H, cdBornTime1H, csFound1H, csBT1H, csBB1H, csLow1H, csHigh1H, csFvgTop1H, csFvgBot1H, csBornTime1H] = request.security(syminfo.tickerid, "60", f_1hCont(swingLen, obLookback), lookahead=barmerge.lookahead_off)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Zone state (active + mitigated)
+// ──────────────────────────────────────────────────────────────────────────────
+var bool originDemandActive = false
+var bool originDemandMitigated = false
+var float originDemandBT = na
+var float originDemandBB = na
+var float originDemandLow = na
+var float originDemandHigh = na
+var int originDemandBornTime = na
+
+var bool originSupplyActive = false
+var bool originSupplyMitigated = false
+var float originSupplyBT = na
+var float originSupplyBB = na
+var float originSupplyLow = na
+var float originSupplyHigh = na
+var int originSupplyBornTime = na
+
+var bool contDemandActive = false
+var bool contDemandMitigated = false
+var float contDemandBT = na
+var float contDemandBB = na
+var float contDemandLow = na
+var float contDemandHigh = na
+var int contDemandBornTime = na
+var float contDemandFvgTop = na
+var float contDemandFvgBot = na
+
+var bool contSupplyActive = false
+var bool contSupplyMitigated = false
+var float contSupplyBT = na
+var float contSupplyBB = na
+var float contSupplyLow = na
+var float contSupplyHigh = na
+var int contSupplyBornTime = na
+var float contSupplyFvgTop = na
+var float contSupplyFvgBot = na
+
+var bool extremeDemandActive = false
+var bool extremeDemandMitigated = false
+var float extremeDemandBT = na
+var float extremeDemandBB = na
+var float extremeDemandLow = na
+var float extremeDemandHigh = na
+var int extremeDemandBornTime = na
+
+var bool extremeSupplyActive = false
+var bool extremeSupplyMitigated = false
+var float extremeSupplyBT = na
+var float extremeSupplyBB = na
+var float extremeSupplyLow = na
+var float extremeSupplyHigh = na
+var int extremeSupplyBornTime = na
+
+// Update zones when HTF/LTF "found" events trigger.
+// (HTF boolean series often align with HTF close bars, not with ta.change(time("240")) boundaries.)
+var int lastOriginDemandBorn = na
+var int lastOriginSupplyBorn = na
+var int lastExtremeDemandBorn = na
+var int lastExtremeSupplyBorn = na
+var int lastContDemandBorn = na
+var int lastContSupplyBorn = na
+
+// Mitigation checks: mitigated when price trades through full candle body.
+// Delay mitigation until AFTER the zone born time, so we don't instantly invalidate on the same bar.
+f_mitigates(float bt, float bb) => not na(bt) and not na(bb) and low <= bb and high >= bt
+
+if bullBOS4H and not na(odBT4H) and not na(odBB4H)
+    if bullBosTimeOb4H != lastOriginDemandBorn
+        originDemandActive := true
+        originDemandMitigated := false
+        originDemandBT := odBT4H
+        originDemandBB := odBB4H
+        originDemandLow := odLow4H
+        originDemandHigh := odHigh4H
+        originDemandBornTime := bullBosTimeOb4H
+        lastOriginDemandBorn := bullBosTimeOb4H
+
+if bearBOS4H and not na(osBT4H) and not na(osBB4H)
+    if bearBosTimeOb4H != lastOriginSupplyBorn
+        originSupplyActive := true
+        originSupplyMitigated := false
+        originSupplyBT := osBT4H
+        originSupplyBB := osBB4H
+        originSupplyLow := osLow4H
+        originSupplyHigh := osHigh4H
+        originSupplyBornTime := bearBosTimeOb4H
+        lastOriginSupplyBorn := bearBosTimeOb4H
+
+// Extreme zones represent deepest OB for each leg.
+// We compute them on their BOS events, and only *use* them later as counter-trend when bias flips.
+if bullBOS4H and not na(exDBT4H) and not na(exDBB4H)
+    if bullBosTimeOb4H != lastExtremeDemandBorn
+        extremeDemandActive := true
+        extremeDemandMitigated := false
+        extremeDemandBT := exDBT4H
+        extremeDemandBB := exDBB4H
+        extremeDemandLow := exDLow4H
+        extremeDemandHigh := exDHigh4H
+        extremeDemandBornTime := bullBosTimeOb4H
+        lastExtremeDemandBorn := bullBosTimeOb4H
+
+if bearBOS4H and not na(exSBT4H) and not na(exSBB4H)
+    if bearBosTimeOb4H != lastExtremeSupplyBorn
+        extremeSupplyActive := true
+        extremeSupplyMitigated := false
+        extremeSupplyBT := exSBT4H
+        extremeSupplyBB := exSBB4H
+        extremeSupplyLow := exSLow4H
+        extremeSupplyHigh := exSHigh4H
+        extremeSupplyBornTime := bearBosTimeOb4H
+        lastExtremeSupplyBorn := bearBosTimeOb4H
+
+// Continuation zones from 1H BOS detection.
+if cdFound1H and not na(cdBT1H) and not na(cdBB1H)
+    if cdBornTime1H != lastContDemandBorn
+        contDemandActive := true
+        contDemandMitigated := false
+        contDemandBT := cdBT1H
+        contDemandBB := cdBB1H
+        contDemandLow := cdLow1H
+        contDemandHigh := cdHigh1H
+        contDemandBornTime := cdBornTime1H
+        contDemandFvgTop := cdFvgTop1H
+        contDemandFvgBot := cdFvgBot1H
+        lastContDemandBorn := cdBornTime1H
+
+if csFound1H and not na(csBT1H) and not na(csBB1H)
+    if csBornTime1H != lastContSupplyBorn
+        contSupplyActive := true
+        contSupplyMitigated := false
+        contSupplyBT := csBT1H
+        contSupplyBB := csBB1H
+        contSupplyLow := csLow1H
+        contSupplyHigh := csHigh1H
+        contSupplyBornTime := csBornTime1H
+        contSupplyFvgTop := csFvgTop1H
+        contSupplyFvgBot := csFvgBot1H
+        lastContSupplyBorn := csBornTime1H
+
+// Mitigate after the zone exists for at least one bar.
+if originDemandActive and not originDemandMitigated and time > originDemandBornTime and f_mitigates(originDemandBT, originDemandBB)
+    originDemandMitigated := true
+    originDemandActive := false
+
+if originSupplyActive and not originSupplyMitigated and time > originSupplyBornTime and f_mitigates(originSupplyBT, originSupplyBB)
+    originSupplyMitigated := true
+    originSupplyActive := false
+
+if contDemandActive and not contDemandMitigated and time > contDemandBornTime and f_mitigates(contDemandBT, contDemandBB)
+    contDemandMitigated := true
+    contDemandActive := false
+
+if contSupplyActive and not contSupplyMitigated and time > contSupplyBornTime and f_mitigates(contSupplyBT, contSupplyBB)
+    contSupplyMitigated := true
+    contSupplyActive := false
+
+if extremeDemandActive and not extremeDemandMitigated and time > extremeDemandBornTime and f_mitigates(extremeDemandBT, extremeDemandBB)
+    extremeDemandMitigated := true
+    extremeDemandActive := false
+
+if extremeSupplyActive and not extremeSupplyMitigated and time > extremeSupplyBornTime and f_mitigates(extremeSupplyBT, extremeSupplyBB)
+    extremeSupplyMitigated := true
+    extremeSupplyActive := false
+
+// 4H Extreme zones (BOS-sourced) — used for POI FVG exemption + pattern filters below.
+inExtremeDemand = extremeDemandActive and high >= extremeDemandBB and low <= extremeDemandBT
+inExtremeSupply = extremeSupplyActive and high >= extremeSupplyBB and low <= extremeSupplyBT
+// 4H Origin + 1H Continuation (same geometry as pattern section — defined here for POI gating).
+inOriginDemand = originDemandActive and high >= originDemandBB and low <= originDemandBT
+inOriginSupply = originSupplyActive and high >= originSupplyBB and low <= originSupplyBT
+inContDemand = contDemandActive and high >= contDemandBB and low <= contDemandBT
+inContSupply = contSupplyActive and high >= contSupplyBB and low <= contSupplyBT
+
+// POI FVG bypass: Extreme always; Origin / Cont optional (looser gating).
+poiFvgHtExemptBuy = inExtremeDemand or (poiFvgExemptOrigin4h and inOriginDemand) or (poiFvgExemptCont1h and inContDemand)
+poiFvgHtExemptSell = inExtremeSupply or (poiFvgExemptOrigin4h and inOriginSupply) or (poiFvgExemptCont1h and inContSupply)
+
+// Deferred: if not qualified when stored, keep re-scanning each bar until gap vs ATR passes or OB is removed.
+ctfSzFvgUp = math.min(math.min(math.min(math.min(math.min(array.size(ctfObTops), array.size(ctfObBots)), array.size(ctfObTimes)), array.size(ctfObBias)), array.size(ctfObPivotBar)), array.size(ctfObFvgOk))
+if poiRequireObFvg and ctfSzFvgUp > 0
+    for j = 0 to ctfSzFvgUp - 1
+        if not array.get(ctfObFvgOk, j)
+            piv = array.get(ctfObPivotBar, j)
+            bias = array.get(ctfObBias, j)
+            if f_chartRangeHasQualifyingFvg(piv, bias, poiObMinFvgAtr)
+                array.set(ctfObFvgOk, j, true)
+
+flowSzFvgUp = math.min(math.min(math.min(math.min(math.min(array.size(flowObTops), array.size(flowObBots)), array.size(flowObTimes)), array.size(flowObBias)), array.size(flowObPivotBar)), array.size(flowObFvgOk))
+if poiRequireObFvg and flowSzFvgUp > 0
+    for j = 0 to flowSzFvgUp - 1
+        if not array.get(flowObFvgOk, j)
+            piv = array.get(flowObPivotBar, j)
+            bias = array.get(flowObBias, j)
+            if f_chartRangeHasQualifyingFvg(piv, bias, poiObMinFvgAtr)
+                array.set(flowObFvgOk, j, true)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Visuals: OB boxes + FVG boxes (redrawn on last bar)
+// ──────────────────────────────────────────────────────────────────────────────
+var box originDemandBox = na
+var box originSupplyBox = na
+var box contDemandBox = na
+var box contSupplyBox = na
+var box extremeDemandBox = na
+var box extremeSupplyBox = na
+var box bullFvgBox = na
+var box bearFvgBox = na
+
+if barstate.islast
+    if not na(originDemandBox)
+        box.delete(originDemandBox)
+    if not na(originSupplyBox)
+        box.delete(originSupplyBox)
+    if not na(contDemandBox)
+        box.delete(contDemandBox)
+    if not na(contSupplyBox)
+        box.delete(contSupplyBox)
+    if not na(extremeDemandBox)
+        box.delete(extremeDemandBox)
+    if not na(extremeSupplyBox)
+        box.delete(extremeSupplyBox)
+    if not na(bullFvgBox)
+        box.delete(bullFvgBox)
+    if not na(bearFvgBox)
+        box.delete(bearFvgBox)
+
+    originDemandBox := na
+    originSupplyBox := na
+    contDemandBox := na
+    contSupplyBox := na
+    extremeDemandBox := na
+    extremeSupplyBox := na
+    bullFvgBox := na
+    bearFvgBox := na
+
+    if showOBs
+        if originDemandActive
+            originDemandBox := box.new(originDemandBornTime, originDemandBT, time, originDemandBB, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorOriginDemand, border_color=colorOriginDemand, border_width=1, text="Origin Demand", text_color=color.white, text_size=size.tiny)
+        if originSupplyActive
+            originSupplyBox := box.new(originSupplyBornTime, originSupplyBT, time, originSupplyBB, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorOriginSupply, border_color=colorOriginSupply, border_width=1, text="Origin Supply", text_color=color.white, text_size=size.tiny)
+
+        if contDemandActive
+            contDemandBox := box.new(contDemandBornTime, contDemandBT, time, contDemandBB, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorContDemand, border_color=colorContDemand, border_width=1, text="Cont. Demand", text_color=color.black, text_size=size.tiny)
+        if contSupplyActive
+            contSupplyBox := box.new(contSupplyBornTime, contSupplyBT, time, contSupplyBB, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorContSupply, border_color=colorContSupply, border_width=1, text="Cont. Supply", text_color=color.black, text_size=size.tiny)
+
+        if extremeDemandActive
+            extremeDemandBox := box.new(extremeDemandBornTime, extremeDemandBT, time, extremeDemandBB, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorExtremeDemand, border_color=colorExtremeDemand, border_width=2, text="Extreme Demand", text_color=color.white, text_size=size.tiny)
+        if extremeSupplyActive
+            extremeSupplyBox := box.new(extremeSupplyBornTime, extremeSupplyBT, time, extremeSupplyBB, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorExtremeSupply, border_color=colorExtremeSupply, border_width=2, text="Extreme Supply", text_color=color.white, text_size=size.tiny)
+
+    if showFVGs
+        if bias == 1 and contDemandActive and not na(contDemandFvgTop) and not na(contDemandFvgBot)
+            bullFvgBox := box.new(contDemandBornTime, contDemandFvgTop, time, contDemandFvgBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorFvgBull, border_color=colorFvgBull, border_width=1, text="FVG", text_color=color.white, text_size=size.tiny)
+        if bias == -1 and contSupplyActive and not na(contSupplyFvgTop) and not na(contSupplyFvgBot)
+            bearFvgBox := box.new(contSupplyBornTime, contSupplyFvgTop, time, contSupplyFvgBot, xloc=xloc.bar_time, extend=extend.right, bgcolor=colorFvgBear, border_color=colorFvgBear, border_width=1, text="FVG", text_color=color.white, text_size=size.tiny)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 15M CHoCH (micro) signal trigger (CHoCH ONLY)
+// ──────────────────────────────────────────────────────────────────────────────
+recentHigh = ta.highest(high, 5)
+recentLow = ta.lowest(low, 5)
+
+localDown = not na(close[3]) and close[3] > close[2] and close[2] > close[1]
+localUp = not na(close[3]) and close[3] < close[2] and close[2] < close[1]
+
+bullChoch15 = barstate.isconfirmed and not na(recentHigh[1]) and close > recentHigh[1] and close[1] <= recentHigh[1] and localDown
+bearChoch15 = barstate.isconfirmed and not na(recentLow[1]) and close < recentLow[1] and close[1] >= recentLow[1] and localUp
+
+// Chart TF leg completeness: chart micro CHoCH + Lux swing BOS per side. Opposing swing BOS clears the other side.
+var bool ctfBullChochSeen = false
+var bool ctfBearChochSeen = false
+var bool ctfBullBosSeen = false
+var bool ctfBearBosSeen = false
+if tfBullBreak
+    ctfBearChochSeen := false
+    ctfBearBosSeen := false
+    ctfBullBosSeen := true
+if tfBearBreak
+    ctfBullChochSeen := false
+    ctfBullBosSeen := false
+    ctfBearBosSeen := true
+if bullChoch15
+    ctfBullChochSeen := true
+if bearChoch15
+    ctfBearChochSeen := true
+ctfLongLegFull = ctfBullChochSeen and ctfBullBosSeen
+ctfShortLegFull = ctfBearChochSeen and ctfBearBosSeen
+
+blockStrongFlowSellsMixedEff = blockStrongFlowSellsMixed and not (useChartLegCommitBypass and ctfLongLegFull)
+blockStrongFlowBuysMixedEff = blockStrongFlowBuysMixed and not (useChartLegCommitBypass and ctfShortLegFull)
+
+// ------------------------------------------------------------------------------
+// Strong-side OB -> LTF CHOCH -> retest OB entry model (5m / 15m) — used when POI Entry Model = CHOCH+OB
+// 15m series also used when POI Entry Model = 15m CHOCH+OB or 15m IFVG + CHOCH (alongside 15m IFVG).
+// 5m series: CHOCH+OB + entryLtfChoice "5m" only.
+// ------------------------------------------------------------------------------
+[bullChoch5m, bearChoch5m, bullObTop5m, bullObBot5m, bearObTop5m, bearObBot5m, bullRetest5m, bearRetest5m] = request.security(syminfo.tickerid, "5", f_ltfChochRetestEngine(ltfSwingLen, ltfObLookback), lookahead=barmerge.lookahead_off)
+[bullChoch15m, bearChoch15m, bullObTop15m, bullObBot15m, bearObTop15m, bearObBot15m, bullRetest15m, bearRetest15m] = request.security(syminfo.tickerid, "15", f_ltfChochRetestEngine(ltfSwingLen, ltfObLookback), lookahead=barmerge.lookahead_off)
+// Opposing FVG + inversion on 15m for POI entry model (not fallback IFVG).
+[bearFvg15, bullFvg15, violBear15, violBull15, bearTop15, bearBot15, bullTop15, bullBot15] = request.security(syminfo.tickerid, "15", f_ifvgViolation(), lookahead=barmerge.lookahead_off)
+[bearFvgFormedChart, bullFvgFormedChart, bearIfvgViolChart, bullIfvgViolChart, bearIfvgTopChart, bearIfvgBotChart, bullIfvgTopChart, bullIfvgBotChart] = f_ifvgViolation()
+[bearFvgFormed1H, bullFvgFormed1H, bearIfvgViol1H, bullIfvgViol1H, bearIfvgTop1H, bearIfvgBot1H, bullIfvgTop1H, bullIfvgBot1H] = request.security(syminfo.tickerid, "60", f_ifvgViolation(), lookahead=barmerge.lookahead_off)
+bearIfvgViolation = ifvgConfirmTf == "1H" ? bearIfvgViol1H : bearIfvgViolChart
+bullIfvgViolation = ifvgConfirmTf == "1H" ? bullIfvgViol1H : bullIfvgViolChart
+bearFvgFormedSel = ifvgConfirmTf == "1H" ? bearFvgFormed1H : bearFvgFormedChart
+bullFvgFormedSel = ifvgConfirmTf == "1H" ? bullFvgFormed1H : bullFvgFormedChart
+ifvgBearTopSel = ifvgConfirmTf == "1H" ? bearIfvgTop1H : bearIfvgTopChart
+ifvgBearBotSel = ifvgConfirmTf == "1H" ? bearIfvgBot1H : bearIfvgBotChart
+ifvgBullTopSel = ifvgConfirmTf == "1H" ? bullIfvgTop1H : bullIfvgTopChart
+ifvgBullBotSel = ifvgConfirmTf == "1H" ? bullIfvgBot1H : bullIfvgBotChart
+
+selBullChoch = entryLtfChoice == "5m" ? bullChoch5m : bullChoch15m
+selBearChoch = entryLtfChoice == "5m" ? bearChoch5m : bearChoch15m
+selBullObTop = entryLtfChoice == "5m" ? bullObTop5m : bullObTop15m
+selBullObBot = entryLtfChoice == "5m" ? bullObBot5m : bullObBot15m
+selBearObTop = entryLtfChoice == "5m" ? bearObTop5m : bearObTop15m
+selBearObBot = entryLtfChoice == "5m" ? bearObBot5m : bearObBot15m
+selBullRetest = entryLtfChoice == "5m" ? bullRetest5m : bullRetest15m
+selBearRetest = entryLtfChoice == "5m" ? bearRetest5m : bearRetest15m
+
+// Detect touch on ANY current-TF strong-side OB (not only the latest one).
+float touchedStrongBullTop = na
+float touchedStrongBullBot = na
+float touchedStrongBearTop = na
+float touchedStrongBearBot = na
+ctfObSizeTouch = math.min(math.min(math.min(math.min(math.min(array.size(ctfObTops), array.size(ctfObBots)), array.size(ctfObTimes)), array.size(ctfObBias)), array.size(ctfObPivotBar)), array.size(ctfObFvgOk))
+if ctfObSizeTouch > 0
+    for j = 0 to ctfObSizeTouch - 1
+        obB = array.get(ctfObBias, j)
+        obTop = array.get(ctfObTops, j)
+        obBot = array.get(ctfObBots, j)
+        obTouched = high >= obBot and low <= obTop
+        obFvgQ = array.get(ctfObFvgOk, j)
+        obHtExempt = (obB == 1 and poiFvgHtExemptBuy) or (obB == -1 and poiFvgHtExemptSell)
+        obPoiValid = not poiRequireObFvg or obFvgQ or obHtExempt
+        if na(touchedStrongBullTop) and tfSwingTrendBias == 1 and obB == 1 and obTouched and obPoiValid
+            touchedStrongBullTop := obTop
+            touchedStrongBullBot := obBot
+        if na(touchedStrongBearTop) and tfSwingTrendBias == -1 and obB == -1 and obTouched and obPoiValid
+            touchedStrongBearTop := obTop
+            touchedStrongBearBot := obBot
+
+touchStrongBullOb = not na(touchedStrongBullTop) and not na(touchedStrongBullBot)
+touchStrongBearOb = not na(touchedStrongBearTop) and not na(touchedStrongBearBot)
+
+// Detect touch on current-timeframe supply/demand zones.
+float touchedFlowBullTop = na
+float touchedFlowBullBot = na
+float touchedFlowBearTop = na
+float touchedFlowBearBot = na
+flowObSizeTouch = math.min(math.min(math.min(math.min(math.min(array.size(flowObTops), array.size(flowObBots)), array.size(flowObTimes)), array.size(flowObBias)), array.size(flowObPivotBar)), array.size(flowObFvgOk))
+if flowObSizeTouch > 0
+    for j = 0 to flowObSizeTouch - 1
+        fB = array.get(flowObBias, j)
+        fTop = array.get(flowObTops, j)
+        fBot = array.get(flowObBots, j)
+        fTouched = high >= fBot and low <= fTop
+        fFvgQ = array.get(flowObFvgOk, j)
+        flowHtExempt = (fB == 1 and poiFvgHtExemptBuy) or (fB == -1 and poiFvgHtExemptSell)
+        flowPoiValid = not poiRequireObFvg or fFvgQ or flowHtExempt
+        if na(touchedFlowBullTop) and fB == 1 and fTouched and flowPoiValid
+            touchedFlowBullTop := fTop
+            touchedFlowBullBot := fBot
+        if na(touchedFlowBearTop) and fB == -1 and fTouched and flowPoiValid
+            touchedFlowBearTop := fTop
+            touchedFlowBearBot := fBot
+
+touchFlowBullOb = not na(touchedFlowBullTop) and not na(touchedFlowBullBot)
+touchFlowBearOb = not na(touchedFlowBearTop) and not na(touchedFlowBearBot)
+
+// Demand/Supply touch -> IFVG confirmation window state.
+var bool waitDemandIfvg = false
+var bool waitSupplyIfvg = false
+var int demandTouchBar = na
+var int supplyTouchBar = na
+var bool demandIfvgConfirmed = false
+var bool supplyIfvgConfirmed = false
+var bool demandIfvgCandidateActive = false
+var bool supplyIfvgCandidateActive = false
+var float demandIfvgTop = na
+var float demandIfvgBot = na
+var float demandIfvgMid = na
+var float demandIfvgEntryLevel = na
+var int demandIfvgConfirmBar = na
+var bool demandIfvgPower = false
+var float supplyIfvgTop = na
+var float supplyIfvgBot = na
+var float supplyIfvgMid = na
+var float supplyIfvgEntryLevel = na
+var int supplyIfvgConfirmBar = na
+var bool supplyIfvgPower = false
+var bool waitFallbackBullRetest = false
+var bool waitFallbackBearRetest = false
+var bool fallbackBuyTouchLatched = false
+var bool fallbackSellTouchLatched = false
+var bool pauseBuyEntriesByMajorIfvg = false
+var bool pauseSellEntriesByMajorIfvg = false
+var float majorBuyIfvgTop = na
+var float majorBuyIfvgBot = na
+var float majorSellIfvgTop = na
+var float majorSellIfvgBot = na
+
+// Premium/Discount IFVG (flow fallback): *formation* gated to swing extremes; violation/retest/entry are not cancelled by price visiting EQ.
+ifvgSwingRange = not na(tfTrailingTop) and not na(tfTrailingBottom) ? (tfTrailingTop - tfTrailingBottom) : na
+ifvgExtremeDiscountNow = not na(ifvgSwingRange) and ifvgSwingRange > 0 and close >= tfTrailingBottom and close <= tfTrailingBottom + ifvgFallbackSwingFrac * ifvgSwingRange
+ifvgExtremePremiumNow = not na(ifvgSwingRange) and ifvgSwingRange > 0 and close >= tfTrailingTop - ifvgFallbackSwingFrac * ifvgSwingRange and close <= tfTrailingTop
+bearFvgFormedExtremeCtx = bearFvgFormedSel and ifvgExtremeDiscountNow
+bullFvgFormedExtremeCtx = bullFvgFormedSel and ifvgExtremePremiumNow
+bearIfvgViolationCtx = bearIfvgViolation
+bullIfvgViolationCtx = bullIfvgViolation
+
+fallbackRetestLocked = waitFallbackBullRetest or waitFallbackBearRetest
+// External structure break event = external CHOCH or BOS (4H context).
+// Use edge detection so we reset once per new structural event, not per chart candle.
+extStructState = bullBOS4H or bearBOS4H or extBull4H or extBear4H
+externalBreakNow = extStructState and not nz(extStructState[1], false)
+resetTol = math.max(syminfo.mintick * 2.0, ta.atr(14) * 0.01)
+touchOnBreakBuy = waitFallbackBullRetest and not na(demandIfvgEntryLevel) and low <= demandIfvgEntryLevel + resetTol and high >= demandIfvgEntryLevel - resetTol
+touchOnBreakSell = waitFallbackBearRetest and not na(supplyIfvgEntryLevel) and low <= supplyIfvgEntryLevel + resetTol and high >= supplyIfvgEntryLevel - resetTol
+
+// If external structure breaks while waiting IFVG retest, reset fallback wait cycle.
+if externalBreakNow and fallbackRetestLocked and not (touchOnBreakBuy or touchOnBreakSell or fallbackBuyTouchLatched or fallbackSellTouchLatched)
+    waitFallbackBullRetest := false
+    waitFallbackBearRetest := false
+    waitDemandIfvg := false
+    waitSupplyIfvg := false
+    demandIfvgConfirmed := false
+    supplyIfvgConfirmed := false
+    demandIfvgCandidateActive := false
+    supplyIfvgCandidateActive := false
+    demandIfvgTop := na
+    demandIfvgBot := na
+    demandIfvgMid := na
+    demandIfvgEntryLevel := na
+    demandIfvgConfirmBar := na
+    demandIfvgPower := false
+    supplyIfvgTop := na
+    supplyIfvgBot := na
+    supplyIfvgMid := na
+    supplyIfvgEntryLevel := na
+    supplyIfvgConfirmBar := na
+    supplyIfvgPower := false
+
+if externalBreakNow
+    pauseBuyEntriesByMajorIfvg := false
+    pauseSellEntriesByMajorIfvg := false
+    majorBuyIfvgTop := na
+    majorBuyIfvgBot := na
+    majorSellIfvgTop := na
+    majorSellIfvgBot := na
+
+if touchFlowBullOb and ifvgExtremeDiscountNow and not fallbackRetestLocked
+    if not waitFallbackBullRetest
+        waitDemandIfvg := true
+        demandTouchBar := bar_index
+        demandIfvgConfirmed := false
+        demandIfvgCandidateActive := false
+        waitFallbackBullRetest := false
+        demandIfvgTop := na
+        demandIfvgBot := na
+        demandIfvgMid := na
+        demandIfvgEntryLevel := na
+        demandIfvgPower := false
+        // Fresh buy-side IFVG cycle: clear stale sell-side wait states.
+        waitSupplyIfvg := false
+        supplyIfvgConfirmed := false
+        supplyIfvgCandidateActive := false
+        supplyIfvgTop := na
+        supplyIfvgBot := na
+        supplyIfvgMid := na
+        supplyIfvgEntryLevel := na
+        supplyIfvgConfirmBar := na
+        supplyIfvgPower := false
+
+if touchFlowBearOb and ifvgExtremePremiumNow and not fallbackRetestLocked
+    if not waitFallbackBearRetest
+        waitSupplyIfvg := true
+        supplyTouchBar := bar_index
+        supplyIfvgConfirmed := false
+        supplyIfvgCandidateActive := false
+        waitFallbackBearRetest := false
+        supplyIfvgTop := na
+        supplyIfvgBot := na
+        supplyIfvgMid := na
+        supplyIfvgEntryLevel := na
+        supplyIfvgPower := false
+        // Fresh sell-side IFVG cycle: clear stale buy-side wait states.
+        waitDemandIfvg := false
+        demandIfvgConfirmed := false
+        demandIfvgCandidateActive := false
+        demandIfvgTop := na
+        demandIfvgBot := na
+        demandIfvgMid := na
+        demandIfvgEntryLevel := na
+        demandIfvgConfirmBar := na
+        demandIfvgPower := false
+
+if waitDemandIfvg and not na(demandTouchBar)
+    // Violation is the decisive event: once seen, immediately move to retest waiting.
+    if bearIfvgViolationCtx and not na(ifvgBearTopSel) and not na(ifvgBearBotSel)
+        demandIfvgTop := math.max(ifvgBearTopSel, ifvgBearBotSel)
+        demandIfvgBot := math.min(ifvgBearTopSel, ifvgBearBotSel)
+        demandIfvgConfirmed := true
+        demandIfvgMid := f_mid(demandIfvgTop, demandIfvgBot)
+        demandIfvgConfirmBar := bar_index
+        waitDemandIfvg := false
+        demandIfvgCandidateActive := false
+        // Direction lock: bear IFVG invalidation confirms BUY path, clear SELL fallback state.
+        waitSupplyIfvg := false
+        supplyIfvgConfirmed := false
+        supplyIfvgCandidateActive := false
+        waitFallbackBearRetest := false
+        supplyIfvgTop := na
+        supplyIfvgBot := na
+        supplyIfvgMid := na
+        supplyIfvgEntryLevel := na
+        supplyIfvgConfirmBar := na
+        supplyIfvgPower := false
+    // Keep tracking newer bearish FVGs while waiting (no extreme filter — price may retrace to EQ).
+    else if demandIfvgCandidateActive and bearFvgFormedSel and not na(ifvgBearTopSel) and not na(ifvgBearBotSel)
+        demandIfvgTop := math.max(ifvgBearTopSel, ifvgBearBotSel)
+        demandIfvgBot := math.min(ifvgBearTopSel, ifvgBearBotSel)
+    else if not demandIfvgCandidateActive and bar_index - demandTouchBar <= ifvgWindowBars and bearFvgFormedExtremeCtx and not na(ifvgBearTopSel) and not na(ifvgBearBotSel)
+        demandIfvgTop := math.max(ifvgBearTopSel, ifvgBearBotSel)
+        demandIfvgBot := math.min(ifvgBearTopSel, ifvgBearBotSel)
+        demandIfvgCandidateActive := true
+    else if demandIfvgCandidateActive and bearIfvgViolationCtx
+        demandIfvgConfirmed := true
+        demandIfvgMid := f_mid(demandIfvgTop, demandIfvgBot)
+        demandIfvgConfirmBar := bar_index
+        waitDemandIfvg := false
+        demandIfvgCandidateActive := false
+
+if waitSupplyIfvg and not na(supplyTouchBar)
+    // Violation is the decisive event: once seen, immediately move to retest waiting.
+    if bullIfvgViolationCtx and not na(ifvgBullTopSel) and not na(ifvgBullBotSel)
+        supplyIfvgTop := math.max(ifvgBullTopSel, ifvgBullBotSel)
+        supplyIfvgBot := math.min(ifvgBullTopSel, ifvgBullBotSel)
+        supplyIfvgConfirmed := true
+        supplyIfvgMid := f_mid(supplyIfvgTop, supplyIfvgBot)
+        supplyIfvgConfirmBar := bar_index
+        waitSupplyIfvg := false
+        supplyIfvgCandidateActive := false
+        // Direction lock: bull IFVG invalidation confirms SELL path, clear BUY fallback state.
+        waitDemandIfvg := false
+        demandIfvgConfirmed := false
+        demandIfvgCandidateActive := false
+        waitFallbackBullRetest := false
+        demandIfvgTop := na
+        demandIfvgBot := na
+        demandIfvgMid := na
+        demandIfvgEntryLevel := na
+        demandIfvgConfirmBar := na
+        demandIfvgPower := false
+    // Keep tracking newer bullish FVGs while waiting (no extreme filter — price may retrace to EQ).
+    else if supplyIfvgCandidateActive and bullFvgFormedSel and not na(ifvgBullTopSel) and not na(ifvgBullBotSel)
+        supplyIfvgTop := math.max(ifvgBullTopSel, ifvgBullBotSel)
+        supplyIfvgBot := math.min(ifvgBullTopSel, ifvgBullBotSel)
+    else if not supplyIfvgCandidateActive and bar_index - supplyTouchBar <= ifvgWindowBars and bullFvgFormedExtremeCtx and not na(ifvgBullTopSel) and not na(ifvgBullBotSel)
+        supplyIfvgTop := math.max(ifvgBullTopSel, ifvgBullBotSel)
+        supplyIfvgBot := math.min(ifvgBullTopSel, ifvgBullBotSel)
+        supplyIfvgCandidateActive := true
+    else if supplyIfvgCandidateActive and bullIfvgViolationCtx
+        supplyIfvgConfirmed := true
+        supplyIfvgMid := f_mid(supplyIfvgTop, supplyIfvgBot)
+        supplyIfvgConfirmBar := bar_index
+        waitSupplyIfvg := false
+        supplyIfvgCandidateActive := false
+
+// Live POI proximity diagnostics (touch/near) for demand/supply zones and swing OBs.
+poiAtrNow = ta.atr(14)
+poiNearBuf = poiAtrNow * poiNearBufferAtr
+flowDemandTouchNow = false
+flowSupplyTouchNow = false
+flowDemandNearNow = false
+flowSupplyNearNow = false
+ctfBullObTouchNow = false
+ctfBearObTouchNow = false
+ctfBullObNearNow = false
+ctfBearObNearNow = false
+float nearestFlowDemandDist = na
+float nearestFlowSupplyDist = na
+float nearestBullObDist = na
+float nearestBearObDist = na
+
+if flowObSizeTouch > 0
+    for j = 0 to flowObSizeTouch - 1
+        fB = array.get(flowObBias, j)
+        fTop = array.get(flowObTops, j)
+        fBot = array.get(flowObBots, j)
+        fTouch = high >= fBot and low <= fTop
+        fFvgQ = array.get(flowObFvgOk, j)
+        flowHtExempt = (fB == 1 and poiFvgHtExemptBuy) or (fB == -1 and poiFvgHtExemptSell)
+        flowPoiValid = not poiRequireObFvg or fFvgQ or flowHtExempt
+        fDist = close > fTop ? close - fTop : close < fBot ? fBot - close : 0.0
+        if fB == 1 and flowPoiValid
+            flowDemandTouchNow := flowDemandTouchNow or fTouch
+            flowDemandNearNow := flowDemandNearNow or (not fTouch and fDist <= poiNearBuf)
+            nearestFlowDemandDist := na(nearestFlowDemandDist) ? fDist : math.min(nearestFlowDemandDist, fDist)
+        if fB == -1 and flowPoiValid
+            flowSupplyTouchNow := flowSupplyTouchNow or fTouch
+            flowSupplyNearNow := flowSupplyNearNow or (not fTouch and fDist <= poiNearBuf)
+            nearestFlowSupplyDist := na(nearestFlowSupplyDist) ? fDist : math.min(nearestFlowSupplyDist, fDist)
+
+if ctfObSizeTouch > 0
+    for j = 0 to ctfObSizeTouch - 1
+        obB = array.get(ctfObBias, j)
+        obTop = array.get(ctfObTops, j)
+        obBot = array.get(ctfObBots, j)
+        obTouch = high >= obBot and low <= obTop
+        obFvgQ = array.get(ctfObFvgOk, j)
+        obHtExempt = (obB == 1 and poiFvgHtExemptBuy) or (obB == -1 and poiFvgHtExemptSell)
+        obPoiValid = not poiRequireObFvg or obFvgQ or obHtExempt
+        obDist = close > obTop ? close - obTop : close < obBot ? obBot - close : 0.0
+        if obB == 1 and obPoiValid
+            ctfBullObTouchNow := ctfBullObTouchNow or obTouch
+            ctfBullObNearNow := ctfBullObNearNow or (not obTouch and obDist <= poiNearBuf)
+            nearestBullObDist := na(nearestBullObDist) ? obDist : math.min(nearestBullObDist, obDist)
+        if obB == -1 and obPoiValid
+            ctfBearObTouchNow := ctfBearObTouchNow or obTouch
+            ctfBearObNearNow := ctfBearObNearNow or (not obTouch and obDist <= poiNearBuf)
+            nearestBearObDist := na(nearestBearObDist) ? obDist : math.min(nearestBearObDist, obDist)
+
+var bool armBull = false
+var bool armBear = false
+var int armBullBar = na
+var int armBearBar = na
+var float armBullZoneTop = na
+var float armBullZoneBot = na
+var float armBearZoneTop = na
+var float armBearZoneBot = na
+var bool armFlowBull = false
+var bool armFlowBear = false
+var int armFlowBullBar = na
+var int armFlowBearBar = na
+var float armFlowBullZoneTop = na
+var float armFlowBullZoneBot = na
+var float armFlowBearZoneTop = na
+var float armFlowBearZoneBot = na
+
+if touchStrongBullOb
+    armBull := true
+    armBullBar := bar_index
+    armBullZoneTop := touchedStrongBullTop
+    armBullZoneBot := touchedStrongBullBot
+if touchStrongBearOb
+    armBear := true
+    armBearBar := bar_index
+    armBearZoneTop := touchedStrongBearTop
+    armBearZoneBot := touchedStrongBearBot
+if touchFlowBullOb and (bias == 1 or ctGateLong)
+    armFlowBull := true
+    armFlowBullBar := bar_index
+    armFlowBullZoneTop := touchedFlowBullTop
+    armFlowBullZoneBot := touchedFlowBullBot
+if touchFlowBearOb and (bias == -1 or ctGateShort)
+    armFlowBear := true
+    armFlowBearBar := bar_index
+    armFlowBearZoneTop := touchedFlowBearTop
+    armFlowBearZoneBot := touchedFlowBearBot
+
+if armBull and not na(armBullBar) and bar_index - armBullBar > strongObArmBars
+    armBull := false
+    armBullZoneTop := na
+    armBullZoneBot := na
+if armBear and not na(armBearBar) and bar_index - armBearBar > strongObArmBars
+    armBear := false
+    armBearZoneTop := na
+    armBearZoneBot := na
+if armFlowBull and not na(armFlowBullBar) and bar_index - armFlowBullBar > strongObArmBars
+    armFlowBull := false
+    armFlowBullZoneTop := na
+    armFlowBullZoneBot := na
+if armFlowBear and not na(armFlowBearBar) and bar_index - armFlowBearBar > strongObArmBars
+    armFlowBear := false
+    armFlowBearZoneTop := na
+    armFlowBearZoneBot := na
+
+// Selected LTF retest signals are already confirmed at their own timeframe.
+// Accept overlap between selected LTF OB and armed strong-zone limits (not strict containment).
+ltfBullObInsideStrongZone = not na(selBullObTop) and not na(selBullObBot) and not na(armBullZoneTop) and not na(armBullZoneBot) and selBullObTop >= armBullZoneBot and selBullObBot <= armBullZoneTop
+ltfBearObInsideStrongZone = not na(selBearObTop) and not na(selBearObBot) and not na(armBearZoneTop) and not na(armBearZoneBot) and selBearObTop >= armBearZoneBot and selBearObBot <= armBearZoneTop
+ltfBullObInsideFlowZone = not na(selBullObTop) and not na(selBullObBot) and not na(armFlowBullZoneTop) and not na(armFlowBullZoneBot) and selBullObTop >= armFlowBullZoneBot and selBullObBot <= armFlowBullZoneTop
+ltfBearObInsideFlowZone = not na(selBearObTop) and not na(selBearObBot) and not na(armFlowBearZoneTop) and not na(armFlowBearZoneBot) and selBearObTop >= armFlowBearZoneBot and selBearObBot <= armFlowBearZoneTop
+
+// ─ 15m opposing FVG POI entry (sell: invert bullish FVG; buy: invert bearish FVG) — not used for fallback IFVG
+poi15mTouchTol = math.max(syminfo.mintick * 2.0, ta.atr(14) * 0.01)
+var int stStrongBuy15 = 0
+var float stStrongBuyFvgTop = na
+var float stStrongBuyFvgBot = na
+var float stStrongBuyEntry = na
+var int stStrongBuyConfBar = na
+var int stStrongSell15 = 0
+var float stStrongSellFvgTop = na
+var float stStrongSellFvgBot = na
+var float stStrongSellEntry = na
+var int stStrongSellConfBar = na
+var int stFlowBuy15 = 0
+var float stFlowBuyFvgTop = na
+var float stFlowBuyFvgBot = na
+var float stFlowBuyEntry = na
+var int stFlowBuyConfBar = na
+var int stFlowSell15 = 0
+var float stFlowSellFvgTop = na
+var float stFlowSellFvgBot = na
+var float stFlowSellEntry = na
+var int stFlowSellConfBar = na
+
+if useChochObPoiEntry
+    stStrongBuy15 := 0
+    stStrongBuyFvgTop := na
+    stStrongBuyFvgBot := na
+    stStrongBuyEntry := na
+    stStrongBuyConfBar := na
+    stStrongSell15 := 0
+    stStrongSellFvgTop := na
+    stStrongSellFvgBot := na
+    stStrongSellEntry := na
+    stStrongSellConfBar := na
+    stFlowBuy15 := 0
+    stFlowBuyFvgTop := na
+    stFlowBuyFvgBot := na
+    stFlowBuyEntry := na
+    stFlowBuyConfBar := na
+    stFlowSell15 := 0
+    stFlowSellFvgTop := na
+    stFlowSellFvgBot := na
+    stFlowSellEntry := na
+    stFlowSellConfBar := na
+else if usePoi15mIfvg
+    // Strong BUY: bearish 15m FVG overlaps POI -> wait violateBear (buyers invert) -> entry at top - 30% height
+    if not armBull
+        stStrongBuy15 := 0
+        stStrongBuyFvgTop := na
+        stStrongBuyFvgBot := na
+        stStrongBuyEntry := na
+        stStrongBuyConfBar := na
+    else
+        sbOv = not na(armBullZoneTop) and not na(armBullZoneBot) and not na(bearTop15) and not na(bearBot15) and f_rangesOverlap(armBullZoneTop, armBullZoneBot, bearTop15, bearBot15)
+        if stStrongBuy15 == 0 and sbOv
+            stStrongBuy15 := 1
+            stStrongBuyFvgTop := bearTop15
+            stStrongBuyFvgBot := bearBot15
+        if stStrongBuy15 == 1 and violBear15 and not na(stStrongBuyFvgTop) and not na(stStrongBuyFvgBot)
+            stStrongBuyEntry := stStrongBuyFvgTop - (stStrongBuyFvgTop - stStrongBuyFvgBot) * 0.30
+            stStrongBuyConfBar := bar_index
+            stStrongBuy15 := 2
+    // Strong SELL: bullish 15m FVG overlaps POI -> wait violateBull (sellers invert) -> entry at bottom + 30% height
+    if not armBear
+        stStrongSell15 := 0
+        stStrongSellFvgTop := na
+        stStrongSellFvgBot := na
+        stStrongSellEntry := na
+        stStrongSellConfBar := na
+    else
+        ssOv = not na(armBearZoneTop) and not na(armBearZoneBot) and not na(bullTop15) and not na(bullBot15) and f_rangesOverlap(armBearZoneTop, armBearZoneBot, bullTop15, bullBot15)
+        if stStrongSell15 == 0 and ssOv
+            stStrongSell15 := 1
+            stStrongSellFvgTop := bullTop15
+            stStrongSellFvgBot := bullBot15
+        if stStrongSell15 == 1 and violBull15 and not na(stStrongSellFvgTop) and not na(stStrongSellFvgBot)
+            stStrongSellEntry := stStrongSellFvgBot + (stStrongSellFvgTop - stStrongSellFvgBot) * 0.30
+            stStrongSellConfBar := bar_index
+            stStrongSell15 := 2
+    // Flow BUY
+    if not armFlowBull
+        stFlowBuy15 := 0
+        stFlowBuyFvgTop := na
+        stFlowBuyFvgBot := na
+        stFlowBuyEntry := na
+        stFlowBuyConfBar := na
+    else
+        fbOv = not na(armFlowBullZoneTop) and not na(armFlowBullZoneBot) and not na(bearTop15) and not na(bearBot15) and f_rangesOverlap(armFlowBullZoneTop, armFlowBullZoneBot, bearTop15, bearBot15)
+        if stFlowBuy15 == 0 and fbOv
+            stFlowBuy15 := 1
+            stFlowBuyFvgTop := bearTop15
+            stFlowBuyFvgBot := bearBot15
+        if stFlowBuy15 == 1 and violBear15 and not na(stFlowBuyFvgTop) and not na(stFlowBuyFvgBot)
+            stFlowBuyEntry := stFlowBuyFvgTop - (stFlowBuyFvgTop - stFlowBuyFvgBot) * 0.30
+            stFlowBuyConfBar := bar_index
+            stFlowBuy15 := 2
+    // Flow SELL
+    if not armFlowBear
+        stFlowSell15 := 0
+        stFlowSellFvgTop := na
+        stFlowSellFvgBot := na
+        stFlowSellEntry := na
+        stFlowSellConfBar := na
+    else
+        fsOv = not na(armFlowBearZoneTop) and not na(armFlowBearZoneBot) and not na(bullTop15) and not na(bullBot15) and f_rangesOverlap(armFlowBearZoneTop, armFlowBearZoneBot, bullTop15, bullBot15)
+        if stFlowSell15 == 0 and fsOv
+            stFlowSell15 := 1
+            stFlowSellFvgTop := bullTop15
+            stFlowSellFvgBot := bullBot15
+        if stFlowSell15 == 1 and violBull15 and not na(stFlowSellFvgTop) and not na(stFlowSellFvgBot)
+            stFlowSellEntry := stFlowSellFvgBot + (stFlowSellFvgTop - stFlowSellFvgBot) * 0.30
+            stFlowSellConfBar := bar_index
+            stFlowSell15 := 2
+else
+    // 15m CHOCH+OB only: do not run 15m IFVG state machine
+    stStrongBuy15 := 0
+    stStrongBuyFvgTop := na
+    stStrongBuyFvgBot := na
+    stStrongBuyEntry := na
+    stStrongBuyConfBar := na
+    stStrongSell15 := 0
+    stStrongSellFvgTop := na
+    stStrongSellFvgBot := na
+    stStrongSellEntry := na
+    stStrongSellConfBar := na
+    stFlowBuy15 := 0
+    stFlowBuyFvgTop := na
+    stFlowBuyFvgBot := na
+    stFlowBuyEntry := na
+    stFlowBuyConfBar := na
+    stFlowSell15 := 0
+    stFlowSellFvgTop := na
+    stFlowSellFvgBot := na
+    stFlowSellEntry := na
+    stFlowSellConfBar := na
+
+poi15mStrongBuyTouchIfvg = usePoi15mIfvg and stStrongBuy15 == 2 and not na(stStrongBuyEntry) and not na(stStrongBuyConfBar) and bar_index >= stStrongBuyConfBar and low <= stStrongBuyEntry + poi15mTouchTol and high >= stStrongBuyEntry - poi15mTouchTol
+poi15mStrongSellTouchIfvg = usePoi15mIfvg and stStrongSell15 == 2 and not na(stStrongSellEntry) and not na(stStrongSellConfBar) and bar_index >= stStrongSellConfBar and low <= stStrongSellEntry + poi15mTouchTol and high >= stStrongSellEntry - poi15mTouchTol
+poi15mFlowBuyTouchIfvg = usePoi15mIfvg and stFlowBuy15 == 2 and not na(stFlowBuyEntry) and not na(stFlowBuyConfBar) and bar_index >= stFlowBuyConfBar and low <= stFlowBuyEntry + poi15mTouchTol and high >= stFlowBuyEntry - poi15mTouchTol
+poi15mFlowSellTouchIfvg = usePoi15mIfvg and stFlowSell15 == 2 and not na(stFlowSellEntry) and not na(stFlowSellConfBar) and bar_index >= stFlowSellConfBar and low <= stFlowSellEntry + poi15mTouchTol and high >= stFlowSellEntry - poi15mTouchTol
+
+flowBullChochRetestEither = bullRetest5m or bullRetest15m
+flowBullChosenObTop = bullRetest5m ? bullObTop5m : bullRetest15m ? bullObTop15m : na
+flowBullChosenObBot = bullRetest5m ? bullObBot5m : bullRetest15m ? bullObBot15m : na
+flowBearChochRetestEither = bearRetest5m or bearRetest15m
+flowBearChosenObTop = bearRetest5m ? bearObTop5m : bearRetest15m ? bearObTop15m : na
+flowBearChosenObBot = bearRetest5m ? bearObBot5m : bearRetest15m ? bearObBot15m : na
+
+poi15mStrongBuyChoch15 = usePoi15mChochOb and bullRetest15m
+poi15mStrongSellChoch15 = usePoi15mChochOb and bearRetest15m
+poi15mFlowBuyChoch15 = usePoi15mChochOb and flowBullChochRetestEither
+poi15mFlowSellChoch15 = usePoi15mChochOb and flowBearChochRetestEither
+
+bullEntryTrigger = useChochObPoiEntry ? selBullRetest : (poi15mStrongBuyTouchIfvg or poi15mStrongBuyChoch15)
+bearEntryTrigger = useChochObPoiEntry ? selBearRetest : (poi15mStrongSellTouchIfvg or poi15mStrongSellChoch15)
+flowBullEntryTrigger = useChochObPoiEntry ? flowBullChochRetestEither : (poi15mFlowBuyTouchIfvg or poi15mFlowBuyChoch15)
+flowBearEntryTrigger = useChochObPoiEntry ? flowBearChochRetestEither : (poi15mFlowSellTouchIfvg or poi15mFlowSellChoch15)
+strongObBuyRaw = not pauseBuyEntriesByMajorIfvg and (not blockStrongFlowBuysMixedEff or ctGateLong) and useStrongObEntry and armBull and bullEntryTrigger and not ctGateShort
+strongObSellRaw = not pauseSellEntriesByMajorIfvg and (not blockStrongFlowSellsMixedEff or ctGateShort) and useStrongObEntry and armBear and bearEntryTrigger and not ctGateLong
+flowContBuyRaw = not pauseBuyEntriesByMajorIfvg and (not blockStrongFlowBuysMixedEff or ctGateLong) and useFlowContEntry and (bias == 1 or ctGateLong) and armFlowBull and flowBullEntryTrigger and not ctGateShort
+flowContSellRaw = not pauseSellEntriesByMajorIfvg and (not blockStrongFlowSellsMixedEff or ctGateShort) and useFlowContEntry and (bias == -1 or ctGateShort) and armFlowBear and flowBearEntryTrigger and not ctGateLong
+
+poiEntryModelTag = useChochObPoiEntry ? entryLtfChoice : poiEntryModel
+
+// Fallback scenario: when strong arming is none, use IFVG violation -> IFVG midpoint retest.
+strongNoneFallback = not armBull and not armBear
+ctfMid = f_mid(tfTrailingTop, tfTrailingBottom)
+inDiscountZone = not na(ctfMid) and close <= ctfMid
+inPremiumZone = not na(ctfMid) and close >= ctfMid
+
+newBullFvgNow = low > high[2]
+newBullFvgTop = low
+newBullFvgBot = high[2]
+newBearFvgNow = high < low[2]
+newBearFvgTop = low[2]
+newBearFvgBot = high
+midTouchTol = math.max(syminfo.mintick * 2.0, ta.atr(14) * 0.01)
+
+if demandIfvgConfirmed and not waitFallbackBullRetest and not na(demandIfvgTop) and not na(demandIfvgBot)
+    demandIfvgMid := na(demandIfvgMid) ? f_mid(demandIfvgTop, demandIfvgBot) : demandIfvgMid
+    demandIfvgConfirmBar := na(demandIfvgConfirmBar) ? bar_index : demandIfvgConfirmBar
+    demandIfvgPower := newBullFvgNow and math.max(demandIfvgBot, newBullFvgBot) <= math.min(demandIfvgTop, newBullFvgTop)
+    ifvgHeight = demandIfvgTop - demandIfvgBot
+    // PREM/DISC refinement: trigger only from the outer 15% side of zone.
+    demandIfvgEntryLevel := demandIfvgTop - ifvgHeight * 0.15
+    waitFallbackBullRetest := true
+    ifvgAtrNow = ta.atr(14)
+    isMajorBuyIfvg = ifvgAtrNow > 0 and ifvgHeight >= ifvgAtrNow * majorIfvgMinSizeAtr
+    if isMajorBuyIfvg
+        pauseSellEntriesByMajorIfvg := true
+        majorBuyIfvgTop := demandIfvgTop
+        majorBuyIfvgBot := demandIfvgBot
+
+if supplyIfvgConfirmed and not waitFallbackBearRetest and not na(supplyIfvgTop) and not na(supplyIfvgBot)
+    supplyIfvgMid := na(supplyIfvgMid) ? f_mid(supplyIfvgTop, supplyIfvgBot) : supplyIfvgMid
+    supplyIfvgConfirmBar := na(supplyIfvgConfirmBar) ? bar_index : supplyIfvgConfirmBar
+    supplyIfvgPower := newBearFvgNow and math.max(supplyIfvgBot, newBearFvgBot) <= math.min(supplyIfvgTop, newBearFvgTop)
+    ifvgHeight = supplyIfvgTop - supplyIfvgBot
+    // PREM/DISC refinement: trigger only from the outer 15% side of zone.
+    supplyIfvgEntryLevel := supplyIfvgBot + ifvgHeight * 0.15
+    waitFallbackBearRetest := true
+    ifvgAtrNow = ta.atr(14)
+    isMajorSellIfvg = ifvgAtrNow > 0 and ifvgHeight >= ifvgAtrNow * majorIfvgMinSizeAtr
+    if isMajorSellIfvg
+        pauseBuyEntriesByMajorIfvg := true
+        majorSellIfvgTop := supplyIfvgTop
+        majorSellIfvgBot := supplyIfvgBot
+
+// Release opposing-entry pauses when the source IFVG is invalidated.
+if pauseSellEntriesByMajorIfvg and not na(majorBuyIfvgBot) and close < majorBuyIfvgBot
+    pauseSellEntriesByMajorIfvg := false
+    majorBuyIfvgTop := na
+    majorBuyIfvgBot := na
+if pauseBuyEntriesByMajorIfvg and not na(majorSellIfvgTop) and close > majorSellIfvgTop
+    pauseBuyEntriesByMajorIfvg := false
+    majorSellIfvgTop := na
+    majorSellIfvgBot := na
+
+// Keep IFVG entry level fixed once retest waiting is active.
+// This avoids marker drift from newer same-side FVGs and preserves tap detection.
+
+fallbackBuyContext = demandIfvgConfirmed and waitFallbackBullRetest
+fallbackSellContext = supplyIfvgConfirmed and waitFallbackBearRetest
+fallbackBuyLevelTouched = fallbackBuyContext and not na(demandIfvgEntryLevel) and not na(demandIfvgConfirmBar) and bar_index >= demandIfvgConfirmBar and low <= demandIfvgEntryLevel + midTouchTol and high >= demandIfvgEntryLevel - midTouchTol
+fallbackSellLevelTouched = fallbackSellContext and not na(supplyIfvgEntryLevel) and not na(supplyIfvgConfirmBar) and bar_index >= supplyIfvgConfirmBar and low <= supplyIfvgEntryLevel + midTouchTol and high >= supplyIfvgEntryLevel - midTouchTol
+if fallbackBuyLevelTouched
+    fallbackBuyTouchLatched := true
+if fallbackSellLevelTouched
+    fallbackSellTouchLatched := true
+fallbackBuyRaw = not pauseBuyEntriesByMajorIfvg and (fallbackBuyLevelTouched or fallbackBuyTouchLatched) and not ctGateShort
+fallbackSellRaw = not pauseSellEntriesByMajorIfvg and (fallbackSellLevelTouched or fallbackSellTouchLatched) and not ctGateLong
+
+rawIsBuy = strongObBuyRaw or flowContBuyRaw or fallbackBuyRaw
+rawAnySignal = strongObBuyRaw or strongObSellRaw or flowContBuyRaw or flowContSellRaw or fallbackBuyRaw or fallbackSellRaw
+
+float rrCandidate = na
+if rawAnySignal
+    atrGate = ta.atr(14)
+    rawEntryPx = strongObBuyRaw or flowContBuyRaw ? (useChochObPoiEntry ? (strongObBuyRaw ? selBullObTop : (not na(flowBullChosenObTop) ? flowBullChosenObTop : selBullObTop)) : (strongObBuyRaw ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : (not na(flowBullChosenObTop) ? flowBullChosenObTop : bullObTop15m)))) : strongObSellRaw or flowContSellRaw ? (useChochObPoiEntry ? (strongObSellRaw ? selBearObBot : (not na(flowBearChosenObBot) ? flowBearChosenObBot : selBearObBot)) : (strongObSellRaw ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : (not na(flowBearChosenObBot) ? flowBearChosenObBot : bearObBot15m)))) : fallbackBuyRaw ? demandIfvgEntryLevel : supplyIfvgEntryLevel
+    rawTp2 = rawIsBuy ? tfTrailingTop : tfTrailingBottom
+    rawSl = rawIsBuy ? ((strongObBuyRaw or flowContBuyRaw) ? (useChochObPoiEntry ? (strongObBuyRaw ? (not na(selBullObBot) ? selBullObBot - atrGate * 0.5 : low - atrGate * 0.5) : (not na(flowBullChosenObBot) ? flowBullChosenObBot - atrGate * 0.5 : (not na(selBullObBot) ? selBullObBot - atrGate * 0.5 : low - atrGate * 0.5))) : (strongObBuyRaw ? (poi15mStrongBuyTouchIfvg ? (not na(stStrongBuyFvgBot) ? stStrongBuyFvgBot - atrGate * 0.5 : low - atrGate * 0.5) : (not na(bullObBot15m) ? bullObBot15m - atrGate * 0.5 : low - atrGate * 0.5)) : (poi15mFlowBuyTouchIfvg ? (not na(stFlowBuyFvgBot) ? stFlowBuyFvgBot - atrGate * 0.5 : low - atrGate * 0.5) : (not na(flowBullChosenObBot) ? flowBullChosenObBot - atrGate * 0.5 : (not na(bullObBot15m) ? bullObBot15m - atrGate * 0.5 : low - atrGate * 0.5))))) : (not na(demandIfvgBot) ? demandIfvgBot - atrGate * 0.5 : low - atrGate * 0.5)) : ((strongObSellRaw or flowContSellRaw) ? (useChochObPoiEntry ? (strongObSellRaw ? (not na(selBearObTop) ? selBearObTop + atrGate * 0.5 : high + atrGate * 0.5) : (not na(flowBearChosenObTop) ? flowBearChosenObTop + atrGate * 0.5 : (not na(selBearObTop) ? selBearObTop + atrGate * 0.5 : high + atrGate * 0.5))) : (strongObSellRaw ? (poi15mStrongSellTouchIfvg ? (not na(stStrongSellFvgTop) ? stStrongSellFvgTop + atrGate * 0.5 : high + atrGate * 0.5) : (not na(bearObTop15m) ? bearObTop15m + atrGate * 0.5 : high + atrGate * 0.5)) : (poi15mFlowSellTouchIfvg ? (not na(stFlowSellFvgTop) ? stFlowSellFvgTop + atrGate * 0.5 : high + atrGate * 0.5) : (not na(flowBearChosenObTop) ? flowBearChosenObTop + atrGate * 0.5 : (not na(bearObTop15m) ? bearObTop15m + atrGate * 0.5 : high + atrGate * 0.5))))) : (not na(supplyIfvgTop) ? supplyIfvgTop + atrGate * 0.5 : high + atrGate * 0.5))
+    rawRisk = rawIsBuy ? (rawEntryPx - rawSl) : (rawSl - rawEntryPx)
+    rawReward = rawIsBuy ? (rawTp2 - rawEntryPx) : (rawEntryPx - rawTp2)
+    rrCandidate := rawRisk > 0 ? (rawReward / rawRisk) : na
+
+rrPass = not na(rrCandidate) and rrCandidate >= minSignalRR
+// If fallback IFVG triggers on this bar, it has priority over other entry families.
+strongObBuy = strongObBuyRaw and rrPass and not (fallbackBuyRaw or fallbackSellRaw)
+strongObSell = strongObSellRaw and rrPass and not (fallbackBuyRaw or fallbackSellRaw)
+flowContBuy = flowContBuyRaw and rrPass and not (fallbackBuyRaw or fallbackSellRaw)
+flowContSell = flowContSellRaw and rrPass and not (fallbackBuyRaw or fallbackSellRaw)
+// IFVG fallback entries are allowed regardless of RR to avoid missing immediate valid taps.
+fallbackBuy = fallbackBuyRaw
+fallbackSell = fallbackSellRaw
+fallbackBuyRrBlocked = fallbackBuyLevelTouched and not fallbackBuy
+fallbackSellRrBlocked = fallbackSellLevelTouched and not fallbackSell
+
+float signalPoiTop = na
+float signalPoiBot = na
+if strongObBuy
+    signalPoiTop := armBullZoneTop
+    signalPoiBot := armBullZoneBot
+else if strongObSell
+    signalPoiTop := armBearZoneTop
+    signalPoiBot := armBearZoneBot
+else if flowContBuy
+    signalPoiTop := armFlowBullZoneTop
+    signalPoiBot := armFlowBullZoneBot
+else if flowContSell
+    signalPoiTop := armFlowBearZoneTop
+    signalPoiBot := armFlowBearZoneBot
+else if fallbackBuy
+    signalPoiTop := demandIfvgTop
+    signalPoiBot := demandIfvgBot
+else if fallbackSell
+    signalPoiTop := supplyIfvgTop
+    signalPoiBot := supplyIfvgBot
+
+if strongObBuy
+    armBull := false
+    armBullZoneTop := na
+    armBullZoneBot := na
+if strongObSell
+    armBear := false
+    armBearZoneTop := na
+    armBearZoneBot := na
+if flowContBuy
+    armFlowBull := false
+    armFlowBullZoneTop := na
+    armFlowBullZoneBot := na
+if flowContSell
+    armFlowBear := false
+    armFlowBearZoneTop := na
+    armFlowBearZoneBot := na
+
+// Defer fallback state reset until after signal rendering/alerts for this bar.
+resetFallbackBuyAfterRender = fallbackBuy
+resetFallbackSellAfterRender = fallbackSell
+
+var label armStateLabel = na
+var label poiStatusLabel = na
+if showArmDebug and barstate.islast
+    armStrongTxt = armBull and armBear ? "STRONG BUY+SELL" : armBull ? "STRONG BUY" : armBear ? "STRONG SELL" : "STRONG NONE"
+    armFlowTxt = armFlowBull and armFlowBear ? "FLOW BUY+SELL" : armFlowBull ? "FLOW BUY" : armFlowBear ? "FLOW SELL" : "FLOW NONE"
+    fallbackTxt = waitDemandIfvg ? "WAIT BEAR IFVG VIOLATION(BUY)" : waitSupplyIfvg ? "WAIT BULL IFVG VIOLATION(SELL)" : fallbackBuyRrBlocked ? "IFVG ENTRY LEVEL TOUCHED(BUY) RR BLOCKED" : fallbackSellRrBlocked ? "IFVG ENTRY LEVEL TOUCHED(SELL) RR BLOCKED" : waitFallbackBullRetest ? "WAIT IFVG ENTRY RETEST(BUY)" : waitFallbackBearRetest ? "WAIT IFVG ENTRY RETEST(SELL)" : "FALLBACK NONE"
+    ctfLegTxt = "CTF leg L=" + str.tostring(ctfLongLegFull) + " S=" + str.tostring(ctfShortLegFull) + (useChartLegCommitBypass ? "" : " (bypass off)")
+    extStructTxt = "EXT4H bull=" + str.tostring(extSeenBullChoch) + " bear=" + str.tostring(extSeenBearChoch) + (extMixedBothChoch ? " MIXED" : "") + (blockStrongFlowSellsMixed ? " SF_SELL_HOLD" : "") + (blockStrongFlowBuysMixed ? " SF_BUY_HOLD" : "") + " | " + ctfLegTxt
+    ctGateTxt = ctGateLong ? "CT_GATE LONG" : ctGateShort ? "CT_GATE SHORT" : "CT_GATE OFF"
+    armStateText = "ARMED: " + armStrongTxt + " | " + armFlowTxt + " (" + poiEntryModelTag + ") | " + fallbackTxt + " | " + extStructTxt + " | " + ctGateTxt
+    armStateColor = armFlowBull or armBull ? color.new(color.green, 0) : armFlowBear or armBear ? color.new(color.red, 0) : color.new(color.gray, 20)
+    zoneArmY = not na(tfTrailingTop) and not na(tfTrailingBottom) ? (tfTrailingBottom + (tfTrailingTop - tfTrailingBottom) * 0.18) : na
+    armStateY = not na(zoneArmY) ? zoneArmY : (high + ta.atr(14) * 0.6)
+    if na(armStateLabel)
+        armStateLabel := label.new(bar_index, armStateY, armStateText, style=label.style_label_left, color=armStateColor, textcolor=color.white, size=size.small)
+    else
+        label.set_xy(armStateLabel, bar_index, armStateY)
+        label.set_text(armStateLabel, armStateText)
+        label.set_color(armStateLabel, armStateColor)
+        label.set_textcolor(armStateLabel, color.white)
+else if not showArmDebug and not na(armStateLabel)
+    label.delete(armStateLabel)
+    armStateLabel := na
+
+if showPoiProximityStatus and barstate.islast
+    dmdState = flowDemandTouchNow ? "TOUCH" : flowDemandNearNow ? "NEAR" : "FAR"
+    supState = flowSupplyTouchNow ? "TOUCH" : flowSupplyNearNow ? "NEAR" : "FAR"
+    bullObState = ctfBullObTouchNow ? "TOUCH" : ctfBullObNearNow ? "NEAR" : "FAR"
+    bearObState = ctfBearObTouchNow ? "TOUCH" : ctfBearObNearNow ? "NEAR" : "FAR"
+    dmdDistTxt = na(nearestFlowDemandDist) ? "na" : f_fmt(nearestFlowDemandDist)
+    supDistTxt = na(nearestFlowSupplyDist) ? "na" : f_fmt(nearestFlowSupplyDist)
+    bullObDistTxt = na(nearestBullObDist) ? "na" : f_fmt(nearestBullObDist)
+    bearObDistTxt = na(nearestBearObDist) ? "na" : f_fmt(nearestBearObDist)
+    poiText = "POI Status -> Demand: " + dmdState + " (" + dmdDistTxt + ") | Supply: " + supState + " (" + supDistTxt + ") | Bull OB: " + bullObState + " (" + bullObDistTxt + ") | Bear OB: " + bearObState + " (" + bearObDistTxt + ")"
+    zonePoiY = not na(tfTrailingTop) and not na(tfTrailingBottom) ? (f_zoneMid(tfTrailingTop, tfTrailingBottom) - (tfTrailingTop - tfTrailingBottom) * 0.14) : na
+    poiY = not na(zonePoiY) ? zonePoiY : (high + ta.atr(14) * 3.2)
+    if na(poiStatusLabel)
+        poiStatusLabel := label.new(bar_index, poiY, poiText, style=label.style_label_left, color=color.new(color.gray, 80), textcolor=color.white, size=size.small)
+    else
+        label.set_xy(poiStatusLabel, bar_index, poiY)
+        label.set_text(poiStatusLabel, poiText)
+        label.set_color(poiStatusLabel, color.new(color.gray, 80))
+        label.set_textcolor(poiStatusLabel, color.white)
+else if not showPoiProximityStatus and not na(poiStatusLabel)
+    label.delete(poiStatusLabel)
+    poiStatusLabel := na
+
+continuationBuy = bias == 1 and inContDemand and bullChoch15 and not ctGateShort
+originBuy = bias == 1 and inOriginDemand and bullChoch15 and not ctGateShort
+extremeBuy = bias == -1 and inExtremeDemand and bullChoch15 and not ctGateShort
+
+continuationSell = bias == -1 and inContSupply and bearChoch15 and not ctGateLong
+originSell = bias == -1 and inOriginSupply and bearChoch15 and not ctGateLong
+extremeSell = bias == 1 and inExtremeSupply and bearChoch15 and not ctGateLong
+
+anySignal = strongObBuy or strongObSell or flowContBuy or flowContSell
+
+anySignal := anySignal or fallbackBuy or fallbackSell
+
+signalType = strongObBuy ? ("STRONG OB BUY " + poiEntryModelTag) : strongObSell ? ("STRONG OB SELL " + poiEntryModelTag) : flowContBuy ? ("FLOW CONT BUY " + poiEntryModelTag) : flowContSell ? ("FLOW CONT SELL " + poiEntryModelTag) : fallbackBuy ? (demandIfvgPower ? "PREM/DISC IFVG 30% BUY (POWER CONTEXT)" : "PREM/DISC IFVG 30% BUY") : fallbackSell ? (supplyIfvgPower ? "PREM/DISC IFVG 30% SELL (POWER CONTEXT)" : "PREM/DISC IFVG 30% SELL") : ""
+signalDir = (strongObBuy or flowContBuy or fallbackBuy) ? "BUY" : "SELL"
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SL/TP + RR + Signal visuals
+// ──────────────────────────────────────────────────────────────────────────────
+atr14 = ta.atr(14)
+
+float zoneLevelForAlert = na
+if strongObBuy
+    zoneLevelForAlert := useChochObPoiEntry ? f_mid(selBullObTop, selBullObBot) : (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : f_mid(bullObTop15m, bullObBot15m))
+else if strongObSell
+    zoneLevelForAlert := useChochObPoiEntry ? f_mid(selBearObTop, selBearObBot) : (poi15mStrongSellTouchIfvg ? stStrongSellEntry : f_mid(bearObTop15m, bearObBot15m))
+else if flowContBuy
+    zoneLevelForAlert := useChochObPoiEntry ? f_mid(flowBullChosenObTop, flowBullChosenObBot) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : f_mid(flowBullChosenObTop, flowBullChosenObBot))
+else if flowContSell
+    zoneLevelForAlert := useChochObPoiEntry ? f_mid(flowBearChosenObTop, flowBearChosenObBot) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : f_mid(flowBearChosenObTop, flowBearChosenObBot))
+else if fallbackBuy
+    zoneLevelForAlert := demandIfvgEntryLevel
+else if fallbackSell
+    zoneLevelForAlert := supplyIfvgEntryLevel
+
+float slLevel = na
+float tp2Level = na
+float tp1Level = na
+float rrLevel = na
+
+if anySignal and barstate.isconfirmed
+    isBuy = strongObBuy or flowContBuy or fallbackBuy
+    // For strong-OB LTF entries use current-TF swing opposite side as target.
+    tp2Level := isBuy ? tfTrailingTop : tfTrailingBottom
+    entryPx = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (strongObBuy ? selBullObTop : (not na(flowBullChosenObTop) ? flowBullChosenObTop : selBullObTop)) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : (not na(flowBullChosenObTop) ? flowBullChosenObTop : bullObTop15m)))) : strongObSell or flowContSell ? (useChochObPoiEntry ? (strongObSell ? selBearObBot : (not na(flowBearChosenObBot) ? flowBearChosenObBot : selBearObBot)) : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : (not na(flowBearChosenObBot) ? flowBearChosenObBot : bearObBot15m)))) : fallbackBuy ? demandIfvgEntryLevel : supplyIfvgEntryLevel
+    tp1Level := entryPx + (tp2Level - entryPx) * 0.5
+    if isBuy
+        obLow = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (strongObBuy ? (not na(selBullObBot) ? selBullObBot : low) : (not na(flowBullChosenObBot) ? flowBullChosenObBot : low)) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? (not na(stStrongBuyFvgBot) ? stStrongBuyFvgBot : low) : (not na(bullObBot15m) ? bullObBot15m : low)) : (poi15mFlowBuyTouchIfvg ? (not na(stFlowBuyFvgBot) ? stFlowBuyFvgBot : low) : (not na(flowBullChosenObBot) ? flowBullChosenObBot : low)))) : (not na(demandIfvgBot) ? demandIfvgBot : low)
+        slLevel := obLow - atr14 * 0.5
+    else
+        obHigh = strongObSell or flowContSell ? (useChochObPoiEntry ? (strongObSell ? (not na(selBearObTop) ? selBearObTop : high) : (not na(flowBearChosenObTop) ? flowBearChosenObTop : high)) : (strongObSell ? (poi15mStrongSellTouchIfvg ? (not na(stStrongSellFvgTop) ? stStrongSellFvgTop : high) : (not na(bearObTop15m) ? bearObTop15m : high)) : (poi15mFlowSellTouchIfvg ? (not na(stFlowSellFvgTop) ? stFlowSellFvgTop : high) : (not na(flowBearChosenObTop) ? flowBearChosenObTop : high)))) : (not na(supplyIfvgTop) ? supplyIfvgTop : high)
+        slLevel := obHigh + atr14 * 0.5
+    rrLevel := (tp2Level - entryPx) / (entryPx - slLevel)
+
+var array<line> slLines = array.new<line>()
+var array<line> tp1Lines = array.new<line>()
+var array<line> tp2Lines = array.new<line>()
+var array<line> entryLines = array.new<line>()
+var array<line> guideConnectLines = array.new<line>()
+var line waitFallbackBuyLine = na
+var line waitFallbackSellLine = na
+var array<label> sigLabels = array.new<label>()
+var array<box> triggeredPoiBoxes = array.new<box>()
+var array<box> violatedFvgBoxes = array.new<box>()
+var float lastBearViolBoxTop = na
+var float lastBearViolBoxBot = na
+var float lastBullViolBoxTop = na
+var float lastBullViolBoxBot = na
+
+if anySignal and barstate.isconfirmed
+    isBuy = strongObBuy or flowContBuy or fallbackBuy
+    sigCol = isBuy ? color.green : color.red
+    triTxt = isBuy ? "BUY" : "SELL"
+    rrTxt = not na(rrLevel) ? str.tostring(rrLevel, "#.##") : "na"
+    strongObEntryPrice = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (strongObBuy ? selBullObTop : (not na(flowBullChosenObTop) ? flowBullChosenObTop : selBullObTop)) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : (not na(flowBullChosenObTop) ? flowBullChosenObTop : bullObTop15m)))) : strongObSell or flowContSell ? (useChochObPoiEntry ? (strongObSell ? selBearObBot : (not na(flowBearChosenObBot) ? flowBearChosenObBot : selBearObBot)) : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : (not na(flowBearChosenObBot) ? flowBearChosenObBot : bearObBot15m)))) : fallbackBuy ? demandIfvgEntryLevel : supplyIfvgEntryLevel
+    entryTxt = (strongObBuy or strongObSell or flowContBuy or flowContSell or fallbackBuy or fallbackSell) and not na(strongObEntryPrice) ? (" | ENTRY: " + f_fmt(strongObEntryPrice)) : ""
+    sigTooltip = triTxt + " " + signalType + entryTxt + " | RR: 1:" + rrTxt
+    sigText = triTxt + " @ " + (not na(strongObEntryPrice) ? f_fmt(strongObEntryPrice) : "na")
+
+    if showSignals
+        y = strongObEntryPrice
+        lbl = label.new(bar_index, y, sigText, style=label.style_label_left, color=sigCol, textcolor=color.white, size=size.small, tooltip=sigTooltip)
+        array.push(sigLabels, lbl)
+
+        // Horizontal entry marker at exact trigger price.
+        if showTradeGuideLines and not na(strongObEntryPrice)
+            lEntry = line.new(bar_index, strongObEntryPrice, bar_index + tradeGuideBars, strongObEntryPrice, xloc=xloc.bar_index, style=line.style_solid, color=sigCol, width=2)
+            array.push(entryLines, lEntry)
+
+        // Keep much deeper label history for replay effectiveness review.
+        maxLabelsKeep = 490
+        while array.size(sigLabels) > maxLabelsKeep
+            label.delete(array.shift(sigLabels))
+
+        maxEntryKeep = 120
+        while array.size(entryLines) > maxEntryKeep
+            line.delete(array.shift(entryLines))
+
+    if showTriggeredPoiBoxes and not na(signalPoiTop) and not na(signalPoiBot)
+        poiTop = math.max(signalPoiTop, signalPoiBot)
+        poiBot = math.min(signalPoiTop, signalPoiBot)
+        poiBox = box.new(bar_index, poiTop, bar_index + triggeredPoiBoxBars, poiBot, xloc=xloc.bar_index, bgcolor=color.new(color.purple, 92), border_color=color.new(color.purple, 0), border_width=1, text="Triggered POI", text_color=color.new(color.purple, 0), text_size=size.tiny)
+        array.push(triggeredPoiBoxes, poiBox)
+        maxPoiKeep = 120
+        while array.size(triggeredPoiBoxes) > maxPoiKeep
+            box.delete(array.shift(triggeredPoiBoxes))
+
+    if showSLTP and showTradeGuideLines and not na(slLevel) and not na(tp1Level) and not na(tp2Level) and not na(strongObEntryPrice)
+        lSL = line.new(bar_index, slLevel, bar_index + tradeGuideBars, slLevel, xloc=xloc.bar_index, style=line.style_dashed, color=colorSL, width=1)
+        lTP1 = line.new(bar_index, tp1Level, bar_index + tradeGuideBars, tp1Level, xloc=xloc.bar_index, style=line.style_dashed, color=colorTP1, width=1)
+        lTP2 = line.new(bar_index, tp2Level, bar_index + tradeGuideBars, tp2Level, xloc=xloc.bar_index, style=line.style_dashed, color=colorTP2, width=1)
+        lowGuide = math.min(slLevel, tp2Level)
+        highGuide = math.max(slLevel, tp2Level)
+        lConn = line.new(bar_index, lowGuide, bar_index, highGuide, xloc=xloc.bar_index, style=line.style_solid, color=color.new(sigCol, 20), width=1)
+        array.push(slLines, lSL)
+        array.push(tp1Lines, lTP1)
+        array.push(tp2Lines, lTP2)
+        array.push(guideConnectLines, lConn)
+
+        maxKeep = 30
+        while array.size(slLines) > maxKeep
+            line.delete(array.shift(slLines))
+        while array.size(tp1Lines) > maxKeep
+            line.delete(array.shift(tp1Lines))
+        while array.size(tp2Lines) > maxKeep
+            line.delete(array.shift(tp2Lines))
+        while array.size(guideConnectLines) > maxKeep
+            line.delete(array.shift(guideConnectLines))
+
+if barstate.islast
+    if not na(waitFallbackBuyLine)
+        line.delete(waitFallbackBuyLine)
+        waitFallbackBuyLine := na
+    if not na(waitFallbackSellLine)
+        line.delete(waitFallbackSellLine)
+        waitFallbackSellLine := na
+    if fallbackBuyContext and not na(demandIfvgEntryLevel)
+        waitFallbackBuyLine := line.new(bar_index, demandIfvgEntryLevel, bar_index + tradeGuideBars, demandIfvgEntryLevel, xloc=xloc.bar_index, extend=extend.right, style=line.style_solid, color=color.new(#FFD700, 0), width=2)
+    if fallbackSellContext and not na(supplyIfvgEntryLevel)
+        waitFallbackSellLine := line.new(bar_index, supplyIfvgEntryLevel, bar_index + tradeGuideBars, supplyIfvgEntryLevel, xloc=xloc.bar_index, extend=extend.right, style=line.style_solid, color=color.new(#FFD700, 0), width=2)
+
+if showViolatedFvgBoxes and barstate.isconfirmed
+    if bearIfvgViolationCtx and not na(ifvgBearTopSel) and not na(ifvgBearBotSel)
+        bTop = math.max(ifvgBearTopSel, ifvgBearBotSel)
+        bBot = math.min(ifvgBearTopSel, ifvgBearBotSel)
+        isNewBearViolBox = na(lastBearViolBoxTop) or na(lastBearViolBoxBot) or bTop != lastBearViolBoxTop or bBot != lastBearViolBoxBot
+        if isNewBearViolBox
+            bBox = box.new(bar_index, bTop, bar_index + violatedFvgBoxBars, bBot, xloc=xloc.bar_index, bgcolor=color.new(color.purple, 90), border_color=color.new(color.purple, 0), border_width=1, text="Violated Bear FVG", text_color=color.new(color.purple, 0), text_size=size.tiny)
+            array.push(violatedFvgBoxes, bBox)
+            lastBearViolBoxTop := bTop
+            lastBearViolBoxBot := bBot
+    if bullIfvgViolationCtx and not na(ifvgBullTopSel) and not na(ifvgBullBotSel)
+        uTop = math.max(ifvgBullTopSel, ifvgBullBotSel)
+        uBot = math.min(ifvgBullTopSel, ifvgBullBotSel)
+        isNewBullViolBox = na(lastBullViolBoxTop) or na(lastBullViolBoxBot) or uTop != lastBullViolBoxTop or uBot != lastBullViolBoxBot
+        if isNewBullViolBox
+            uBox = box.new(bar_index, uTop, bar_index + violatedFvgBoxBars, uBot, xloc=xloc.bar_index, bgcolor=color.new(color.purple, 90), border_color=color.new(color.purple, 0), border_width=1, text="Violated Bull FVG", text_color=color.new(color.purple, 0), text_size=size.tiny)
+            array.push(violatedFvgBoxes, uBox)
+            lastBullViolBoxTop := uTop
+            lastBullViolBoxBot := uBot
+    maxIfvgBoxes = 120
+    while array.size(violatedFvgBoxes) > maxIfvgBoxes
+        box.delete(array.shift(violatedFvgBoxes))
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ──────────────────────────────────────────────────────────────────────────────
+biasStr = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
+dirStr = (strongObBuy or flowContBuy) ? "BUY" : "SELL"
+dirStr := (strongObBuy or flowContBuy or fallbackBuy) ? "BUY" : "SELL"
+zoneStr = not na(zoneLevelForAlert) ? f_fmt(zoneLevelForAlert) : "na"
+symbolStr = syminfo.tickerid
+entryPxForAlert = strongObBuy or flowContBuy ? (useChochObPoiEntry ? (strongObBuy ? selBullObTop : (not na(flowBullChosenObTop) ? flowBullChosenObTop : selBullObTop)) : (strongObBuy ? (poi15mStrongBuyTouchIfvg ? stStrongBuyEntry : bullObTop15m) : (poi15mFlowBuyTouchIfvg ? stFlowBuyEntry : (not na(flowBullChosenObTop) ? flowBullChosenObTop : bullObTop15m)))) : strongObSell or flowContSell ? (useChochObPoiEntry ? (strongObSell ? selBearObBot : (not na(flowBearChosenObBot) ? flowBearChosenObBot : selBearObBot)) : (strongObSell ? (poi15mStrongSellTouchIfvg ? stStrongSellEntry : bearObBot15m) : (poi15mFlowSellTouchIfvg ? stFlowSellEntry : (not na(flowBearChosenObBot) ? flowBearChosenObBot : bearObBot15m)))) : fallbackBuy ? demandIfvgEntryLevel : fallbackSell ? supplyIfvgEntryLevel : na
+entryStr = not na(entryPxForAlert) ? f_fmt(entryPxForAlert) : "na"
+rrStrAlert = not na(rrLevel) ? ("1:" + str.tostring(rrLevel, "#.##")) : "na"
+ctGateStr = ctGateLong ? "CT_LONG" : ctGateShort ? "CT_SHORT" : "OFF"
+
+// alertcondition() message must be a *const string*.
+alertcondition(continuationBuy,  "Continuation Buy Signal",  "SMC: CONT BUY")
+alertcondition(originBuy,         "Origin Buy Signal",        "SMC: ORIGIN BUY")
+alertcondition(extremeBuy,       "Extreme Buy Signal",       "SMC: EXTREME BUY")
+
+alertcondition(continuationSell, "Continuation Sell Signal", "SMC: CONT SELL")
+alertcondition(originSell,        "Origin Sell Signal",       "SMC: ORIGIN SELL")
+alertcondition(extremeSell,      "Extreme Sell Signal",      "SMC: EXTREME SELL")
+alertcondition(strongObBuy,      "Strong OB Buy (Selected LTF)",  "SMC: STRONG OB BUY")
+alertcondition(strongObSell,     "Strong OB Sell (Selected LTF)", "SMC: STRONG OB SELL")
+alertcondition(flowContBuy,      "Flow Continuation Buy (Selected LTF)",  "SMC: FLOW CONT BUY")
+alertcondition(flowContSell,     "Flow Continuation Sell (Selected LTF)", "SMC: FLOW CONT SELL")
+alertcondition(fallbackBuy,      "Premium/Discount IFVG Retest Buy",  "SMC: PREM DISC IFVG RETEST BUY")
+alertcondition(fallbackSell,     "Premium/Discount IFVG Retest Sell", "SMC: PREM DISC IFVG RETEST SELL")
+
+alertcondition(anySignal,        "Any SMC Signal",            "SMC: ANY SIGNAL")
+
+// Use alert() to send a dynamic payload (zone + bias) when signals confirm.
+if anySignal and barstate.isconfirmed
+    anyMsgDyn = "SMC Signal: " + signalType + " | Symbol: " + symbolStr + " | Direction: " + dirStr + " | Entry: " + entryStr + " | Proposed RR: " + rrStrAlert + " | Zone: " + zoneStr + " | Bias: " + biasStr + " | CT Gate: " + ctGateStr
+    alert(anyMsgDyn, alert.freq_once_per_bar_close)
+
+if resetFallbackBuyAfterRender
+    waitFallbackBullRetest := false
+    waitDemandIfvg := false
+    demandIfvgConfirmed := false
+    demandIfvgCandidateActive := false
+    demandIfvgTop := na
+    demandIfvgBot := na
+    demandIfvgMid := na
+    demandIfvgEntryLevel := na
+    demandIfvgConfirmBar := na
+    demandIfvgPower := false
+    fallbackBuyTouchLatched := false
+if resetFallbackSellAfterRender
+    waitFallbackBearRetest := false
+    waitSupplyIfvg := false
+    supplyIfvgConfirmed := false
+    supplyIfvgCandidateActive := false
+    supplyIfvgTop := na
+    supplyIfvgBot := na
+    supplyIfvgMid := na
+    supplyIfvgEntryLevel := na
+    supplyIfvgConfirmBar := na
+    supplyIfvgPower := false
+    fallbackSellTouchLatched := false

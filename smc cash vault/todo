@@ -56,3 +56,33 @@ Future additions — Swing POI Entry Marker (v1.2 improve)  [todo 1]
 3. Continuation moves where we have candle + impulse even if the candle before the impulse is not the opposite colour (relax strict opposite-candle requirement for displacement legs).
 4. Filter legacy entry POIs: prefer order blocks that led to the structure change; de-prioritise or filter “middle” OBs that are often inducement before a sweep and the main move.
 5. introduce the IFVG entry model on reversals
+
+
+================================================================================
+Needed Major Improvements 
+================================================================================
+2026-03-30.
+1. Check why Bullish breaker entry was not fired here. 
+My Guess is that the IFVG lock could have affected this
+
+2. Investigated how to also ensure that we Trade Inducement setups.
+I.e price has already shown intended direction. 
+
+Sweeps relatively equal lows/highs. then reverses to the direction it was originally heading to. 
+
+- consider marking out the liquidity area i.e line then any POI below or above it interms of a Breaker block/Mitigation Block or Reasonable size HTF FVG, then entry on either HTF MSS + retest or IFVG entry model. 
+
+3. in the same screenshot below I see alot of continuation moves being missed. need to check which condition is blocking those.
+
+Check. 
+GBPJPY_2026-03-30_00-10-44.png
+
+
+4. 2 ifvg reversal entries missed because price did not go all the way to 30% of the FVG. so if the IFVG forms a coresponding overlaping fvg then we should not wait for 30% tag, instead just enter on price getting close to the Box, 
+
+- also reduce the size of the FVG. Find a better way of controling in which locaitons to look out for this!!! is it after a mojor liquidity sweep on the same timeframe?
+
+Check 
+GBPJPY_2026-03-30_00-37-25.png
+
+

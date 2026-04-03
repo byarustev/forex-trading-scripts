@@ -68,3 +68,65 @@ Also most signals need a lot of quality filtering will keep weeding out slowly
 - We are missing a good no of retest moves due to 
 the IFVG concept its also pretty acculate so can't dismiss it entirely
 
+v1.6 (27th March 2026)
+- introduced breaker entries. (Perfect for continuations)
+These are also able to use historical levels to execute 
+nice reversals before you even think about it. 
+breakerMinMoveAtr at 2 - got better values
+
+
+Areas that you would normally fail to look at
+
+- refinement on the FLOW CONT entries to happen with in 30% or premimum 
+and discount zones so that bad entries are ruled out. Worked like chum
+
+Also refined the PREM/DISC 30% to also happen when price is in the 
+30% of the respective some to prevent wrong signals
+
+- also fixed a bug where at times PREM/DISC signals would be given at a wrong place
+
+
+Future improvements 
+- need to refine when PREM/DISC 30% are fired. Quality of the FVG
+- might need to have a way of invalidating this FVG i.e if say price 
+closes below it (BUYs) or above it. 
+need to ensure that the touching is respecting it. 
+
+
+Remark (27th march 2026)
+Note: at this quality the product is ready to go live
+ but I will need to be refining the entry singals my self until i fix all the bugs
+
+TODO:
+Add timeframe to signals so that I know to how to place them. 
+4H signals 1:5R
+1H signals 1:3R or even 5. these usually have smaller SL levels 
+
+Break and retest entries not working fine on 
+internal structure. i.e once price is moving from a weak side to the stronger one. 
+
+// revist ifvg entries mostly to add the concept of a liquidity sweeep
+
+
+v1.7
+Restrict PREM/DISC reversal moves to only beconsidered after a weak swing is 
+cleared for anti trend moves
+
+- improve cont entries to be strict to targeting above 4.5RR
+
+- added OB + FVG in our entry model to enable entering continuation moves
+
+
+- new improvement to add. After price has just created a new Swing level, 
+
+then stay away from continuation entries in the strong direction until price sweeps some liquidity
+
+- block continuation moves if price breaks a swing level until it sweeps some liquidity
+
+Fixes. 
+3rd Apirl 2026
+- Fixed major bug we had introduced on Bias fliping
+- Also changed the IFVG entries to CISD + retest and confined 
+them to 10% of the external swing golden zone 
+
+This version is now more stable
