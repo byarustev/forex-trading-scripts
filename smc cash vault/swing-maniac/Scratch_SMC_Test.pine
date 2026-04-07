@@ -29,6 +29,7 @@ flowEqLiqTolTicks = input.int(3, "Flow Continuation: EQH/EQL Tolerance (ticks)",
 minSignalRR = input.float(4.5, "Minimum Signal RR", group=groupStructure, minval=4.5, step=0.1)
 poiRequireObFvg = input.bool(true, "POI: Require FVG after OB (chart TF)", group=groupStructure, tooltip="Swing/flow OB must see a chart-TF impulse FVG after the pivot (unless HTF exempt).")
 poiObMinFvgAtr = input.float(0.25, "POI: Min FVG gap (× ATR(14))", group=groupStructure, minval=0.0, step=0.05, tooltip="Same idea as IFVG min size: bull/bear gap must be ≥ this × ATR(14) on that bar.")
+contFvgMinGapAtr = input.float(0.20, "Cont FVG POI: Min FVG gap (× ATR(14))", group=groupStructure, minval=0.0, step=0.05, tooltip="Minimum gap size required for pre-Bull/pre-Bear FVG continuation POIs. Larger values filter weaker gaps.")
 poiFvgExemptOrigin4h = input.bool(true, "POI FVG: Exempt inside 4H Origin (also Extreme)", group=groupStructure)
 poiFvgExemptCont1h = input.bool(true, "POI FVG: Exempt inside 1H Continuation OB", group=groupStructure)
 useStrongZoneCtGate = input.bool(true, "Strong-zone counter-trend gate", group=groupStructure, tooltip="Touch Lux strong band (same geometry as Strong box): trade expansion toward weak side + pullbacks in that direction. Pauses opposing entries. Exit: weak-band touch, chart TF swing flip (strong side changes), or opposing External CHoCH (optional). Re-anchoring strong to a new level on the same side does not exit.")
@@ -554,8 +555,11 @@ if newSupplyZone
                 array.pop(flowObFvgOk)
 
 // Extra continuation POIs: last candle before chart-TF FVG creation.
-newBullFvgPoi = low > high[2]
-newBearFvgPoi = high < low[2]
+contFvgMinGap = ta.atr(14) * contFvgMinGapAtr
+bullFvgGapNow = low - high[2]
+bearFvgGapNow = low[2] - high
+newBullFvgPoi = low > high[2] and bullFvgGapNow >= contFvgMinGap
+newBearFvgPoi = high < low[2] and bearFvgGapNow >= contFvgMinGap
 if newBullFvgPoi
     int idxBearPreBullFvg = na
     for i = 1 to flowObLookback
@@ -1487,6 +1491,13 @@ touchFlowBullOb := not na(touchedFlowBullTop) and not na(touchedFlowBullBot)
 touchFlowBearOb := not na(touchedFlowBearTop) and not na(touchedFlowBearBot)
 touchContFvgBullOb = not na(touchedContFvgBullTop) and not na(touchedContFvgBullBot)
 touchContFvgBearOb = not na(touchedContFvgBearTop) and not na(touchedContFvgBearBot)
+contFvgSwingRangeNow = not na(tfTrailingTop) and not na(tfTrailingBottom) ? (tfTrailingTop - tfTrailingBottom) : na
+contFvgBottom35Max = not na(contFvgSwingRangeNow) ? tfTrailingBottom + contFvgSwingRangeNow * 0.35 : na
+contFvgTop35Min = not na(contFvgSwingRangeNow) ? tfTrailingTop - contFvgSwingRangeNow * 0.35 : na
+contFvgBullMid = touchContFvgBullOb ? f_mid(touchedContFvgBullTop, touchedContFvgBullBot) : na
+contFvgBearMid = touchContFvgBearOb ? f_mid(touchedContFvgBearTop, touchedContFvgBearBot) : na
+contFvgBullInDiscount35 = touchContFvgBullOb and not na(contFvgBottom35Max) and not na(contFvgBullMid) and contFvgBullMid <= contFvgBottom35Max
+contFvgBearInPremium35 = touchContFvgBearOb and not na(contFvgTop35Min) and not na(contFvgBearMid) and contFvgBearMid >= contFvgTop35Min
 
 // Demand/Supply touch -> IFVG confirmation window state.
 var bool waitDemandIfvg = false
@@ -1519,6 +1530,8 @@ var float majorBuyIfvgTop = na
 var float majorBuyIfvgBot = na
 var float majorSellIfvgTop = na
 var float majorSellIfvgBot = na
+bullCisdChart = not na(high[1]) and close[1] < open[1] and close > high[1] and close[1] <= high[1]
+bearCisdChart = not na(low[1]) and close[1] > open[1] and close < low[1] and close[1] >= low[1]
 
 // Premium/Discount IFVG (flow fallback): *formation* gated to swing extremes; violation/retest/entry are not cancelled by price visiting EQ.
 ifvgSwingRange = not na(tfTrailingTop) and not na(tfTrailingBottom) ? (tfTrailingTop - tfTrailingBottom) : na
@@ -1753,6 +1766,8 @@ var bool armFlowBull = false
 var bool armFlowBear = false
 var bool armFlowBullFromContFvg = false
 var bool armFlowBearFromContFvg = false
+var bool armFlowBullBiasBypass = false
+var bool armFlowBearBiasBypass = false
 var int armFlowBullBar = na
 var int armFlowBearBar = na
 var float armFlowBullZoneTop = na
@@ -1761,8 +1776,8 @@ var float armFlowBearZoneTop = na
 var float armFlowBearZoneBot = na
 
 // For FVG-genesis continuation POIs:
-// after POI touch, wait for 15m CHOCH, then retest the 15m
-// same-direction breaker block (the CHOCH-forming OB) captured on that CHOCH.
+// after POI touch, wait for chart-TF CISD, then retest the chart-TF
+// breaker block (the CISD-forming opposite candle).
 var bool waitContFvgBullChoch = false
 var bool waitContFvgBearChoch = false
 var bool waitContFvgBullRetest15mExtOb = false
@@ -1784,9 +1799,13 @@ if touchStrongBearOb
     armBearBar := bar_index
     armBearZoneTop := touchedStrongBearTop
     armBearZoneBot := touchedStrongBearBot
-if touchFlowBullOb and (bias == 1 or ctGateLong)
+bullContFvgBypassBiasNow = contFvgBullInDiscount35
+bearContFvgBypassBiasNow = contFvgBearInPremium35
+
+if touchFlowBullOb and ((bias == 1 or ctGateLong) or bullContFvgBypassBiasNow)
     armFlowBull := true
     armFlowBullFromContFvg := touchContFvgBullOb
+    armFlowBullBiasBypass := armFlowBullFromContFvg and bullContFvgBypassBiasNow
     armFlowBullBar := bar_index
     armFlowBullZoneTop := touchedFlowBullTop
     armFlowBullZoneBot := touchedFlowBullBot
@@ -1796,9 +1815,10 @@ if touchFlowBullOb and (bias == 1 or ctGateLong)
         contFvgBull15mExtObTop := na
         contFvgBull15mExtObBot := na
         contFvgBull15mExtObBornBar := na
-if touchFlowBearOb and (bias == -1 or ctGateShort)
+if touchFlowBearOb and ((bias == -1 or ctGateShort) or bearContFvgBypassBiasNow)
     armFlowBear := true
     armFlowBearFromContFvg := touchContFvgBearOb
+    armFlowBearBiasBypass := armFlowBearFromContFvg and bearContFvgBypassBiasNow
     armFlowBearBar := bar_index
     armFlowBearZoneTop := touchedFlowBearTop
     armFlowBearZoneBot := touchedFlowBearBot
@@ -1809,15 +1829,15 @@ if touchFlowBearOb and (bias == -1 or ctGateShort)
         contFvgBear15mExtObBot := na
         contFvgBear15mExtObBornBar := na
 
-if armFlowBullFromContFvg and waitContFvgBullChoch and bullChoch15m and not na(bullObTop15m) and not na(bullObBot15m)
-    contFvgBull15mExtObTop := bullObTop15m
-    contFvgBull15mExtObBot := bullObBot15m
+if armFlowBullFromContFvg and waitContFvgBullChoch and bullCisdChart
+    contFvgBull15mExtObTop := high[1]
+    contFvgBull15mExtObBot := low[1]
     contFvgBull15mExtObBornBar := bar_index
     waitContFvgBullChoch := false
     waitContFvgBullRetest15mExtOb := true
-if armFlowBearFromContFvg and waitContFvgBearChoch and bearChoch15m and not na(bearObTop15m) and not na(bearObBot15m)
-    contFvgBear15mExtObTop := bearObTop15m
-    contFvgBear15mExtObBot := bearObBot15m
+if armFlowBearFromContFvg and waitContFvgBearChoch and bearCisdChart
+    contFvgBear15mExtObTop := high[1]
+    contFvgBear15mExtObBot := low[1]
     contFvgBear15mExtObBornBar := bar_index
     waitContFvgBearChoch := false
     waitContFvgBearRetest15mExtOb := true
@@ -1833,6 +1853,7 @@ if armBear and not na(armBearBar) and bar_index - armBearBar > strongObArmBars
 if armFlowBull and not na(armFlowBullBar) and bar_index - armFlowBullBar > strongObArmBars
     armFlowBull := false
     armFlowBullFromContFvg := false
+    armFlowBullBiasBypass := false
     armFlowBullZoneTop := na
     armFlowBullZoneBot := na
     waitContFvgBullChoch := false
@@ -1843,6 +1864,7 @@ if armFlowBull and not na(armFlowBullBar) and bar_index - armFlowBullBar > stron
 if armFlowBear and not na(armFlowBearBar) and bar_index - armFlowBearBar > strongObArmBars
     armFlowBear := false
     armFlowBearFromContFvg := false
+    armFlowBearBiasBypass := false
     armFlowBearZoneTop := na
     armFlowBearZoneBot := na
     waitContFvgBearChoch := false
@@ -2025,8 +2047,8 @@ flowBullEntryTrigger := armFlowBullFromContFvg ? flowBullRetestContFvg15m : flow
 flowBearEntryTrigger := armFlowBearFromContFvg ? flowBearRetestContFvg15m : flowBearEntryTrigger
 strongObBuyRaw = longReversalSweepOk and not pauseBuyEntriesByMajorIfvg and (not blockStrongFlowBuysMixedEff or ctGateLong) and useStrongObEntry and armBull and bullEntryTrigger and not ctGateShort
 strongObSellRaw = shortReversalSweepOk and not pauseSellEntriesByMajorIfvg and (not blockStrongFlowSellsMixedEff or ctGateShort) and useStrongObEntry and armBear and bearEntryTrigger and not ctGateLong
-flowContBuyRaw = flowBuyLiqSweepGateOk and longReversalSweepOk and not pauseBuyEntriesByMajorIfvg and (not blockStrongFlowBuysMixedEff or ctGateLong) and useFlowContEntry and (bias == 1 or ctGateLong) and armFlowBull and flowBullEntryTrigger and not ctGateShort
-flowContSellRaw = flowSellLiqSweepGateOk and shortReversalSweepOk and not pauseSellEntriesByMajorIfvg and (not blockStrongFlowSellsMixedEff or ctGateShort) and useFlowContEntry and (bias == -1 or ctGateShort) and armFlowBear and flowBearEntryTrigger and not ctGateLong
+flowContBuyRaw = flowBuyLiqSweepGateOk and longReversalSweepOk and not pauseBuyEntriesByMajorIfvg and (not blockStrongFlowBuysMixedEff or ctGateLong) and useFlowContEntry and ((bias == 1 or ctGateLong) or armFlowBullBiasBypass) and armFlowBull and flowBullEntryTrigger and not ctGateShort
+flowContSellRaw = flowSellLiqSweepGateOk and shortReversalSweepOk and not pauseSellEntriesByMajorIfvg and (not blockStrongFlowSellsMixedEff or ctGateShort) and useFlowContEntry and ((bias == -1 or ctGateShort) or armFlowBearBiasBypass) and armFlowBear and flowBearEntryTrigger and not ctGateLong
 
 poiEntryModelTag = useChochObPoiEntry ? entryLtfChoice : poiEntryModel
 
@@ -2040,9 +2062,6 @@ majorBuyIfvgTop := na
 majorBuyIfvgBot := na
 majorSellIfvgTop := na
 majorSellIfvgBot := na
-
-bullCisdChart = not na(high[1]) and close[1] < open[1] and close > high[1] and close[1] <= high[1]
-bearCisdChart = not na(low[1]) and close[1] > open[1] and close < low[1] and close[1] >= low[1]
 
 if bullCisdChart
     demandIfvgTop := high[1]
@@ -2166,6 +2185,7 @@ if flowContBuy
             rBull := rBull - 1
     armFlowBull := false
     armFlowBullFromContFvg := false
+    armFlowBullBiasBypass := false
     armFlowBullZoneTop := na
     armFlowBullZoneBot := na
     waitContFvgBullChoch := false
@@ -2190,6 +2210,7 @@ if flowContSell
             rBear := rBear - 1
     armFlowBear := false
     armFlowBearFromContFvg := false
+    armFlowBearBiasBypass := false
     armFlowBearZoneTop := na
     armFlowBearZoneBot := na
     waitContFvgBearChoch := false

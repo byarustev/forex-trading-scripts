@@ -130,3 +130,21 @@ Fixes.
 them to 10% of the external swing golden zone 
 
 This version is now more stable
+
+- Also made the CISD entries to be triggered when ever price touches unmitigated pre-Bull/ pre-Bear FVG POIs
+removed bias restrictions on these. I think we might need to filter which size of FVGs are considered worthy
+
+- Added a filter on the size of FVGS to be considered on the pre-Bull / pre-Bear FVG POIs and this has made it better
+
+Fix next. FLOW CONT entries 
+- in some situations we have a buy signal being 
+given in an area where there is a strong Bearish POI. 
+might need to filter that out too
+
+- also we have some sell cont entries being given when we are in a clear bullish bias. 
+I think this comes to the CISD + retest adjustment that I have made. 
+
+For this i might need an exemption for counter trend
+Another alternative for this move to check the opposing force 
+i.e do we have like a bullish FVG or Order block that is close that would cut our move short?
+
