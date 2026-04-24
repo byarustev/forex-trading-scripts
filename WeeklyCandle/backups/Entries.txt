@@ -1,0 +1,10 @@
+17 april 2026
+- Some W entry Options to consider. 
+1. Daily Respect Candle
+When price gets to a Weekly POI, 1. wait for Daily to start respecting Directional bias. 
+Once the Daily creates an FVG. place a limit in the middle of the FVG. 
+
+2. We could use 4H CISD + pullback into 4H OB or FVG left behide.
+
+3. 4H IFVG formation. entry once price retests 30% of the ifvg.
+ 

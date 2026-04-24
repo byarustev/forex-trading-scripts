@@ -1,0 +1,22 @@
+1.0 
+- marking the weekly range and also setting the target. 
+What needs refinement. 
+
+At times when a candle has a relatively fair rejection, 
+even if its a bullish candle we endup getting the Bias wrongly
+
+1.1
+- able to identify LTF pois but are not being drawn properly. 
+- also the Markedout Weekly labels are also persitent on all timeframes
+- added alerts at the close of the Week. 
+- Add Weekly POIS i.e Order blocks (Order Block Detector)
+- Added Weekly FVGS as POIS -- dotted
+
+
+What I plan to achieve next,
+1. Add a variation for also Trading a monthly Candle 
+2. Once price reaches a Weekly POI, send a notification such that such a pair 
+is put on my radder as I wait for entry formation. 
+3. Firing entry signals once Price starts respecting the Weekly POI. 
+
+

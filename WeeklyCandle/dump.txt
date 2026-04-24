@@ -1,0 +1,31 @@
+So the lower-timeframe workflow becomes:
+Wait for the weekly candle to close.
+Classify it as disrespect or respect, and bullish or bearish.
+Use that classification to define directional expectation and immediate target.
+Drop to Daily first and look for valid PD arrays or POIs that exist inside that weekly candle's range.
+Only if Daily does not provide a valid POI, then drop to 4H.
+Mark those POIs as the candidate zones for the new week.
+When the new week opens and price trades into one of those marked zones, wait for entry confirmation and then execute toward the predefined weekly target.
+That constraint is actually excellent for turning this into an indicator because it reduces noise and makes the rules more programmable. It gives us a clear hierarchy:
+Weekly decides bias and targets.
+Daily is the first refinement layer for POIs.
+4H is fallback refinement only.
+All POIs must lie within the mother weekly candle.
+So yes, this is clear, and it improves the design a lot.
+What still needs to be defined before coding is mostly rule precision, not the overall concept. The biggest items are:
+Exact mathematical definition of a respect candle vs disrespect candle.
+Exact POI types the indicator should detect first: FVG, mitigation block, order block, breaker, etc.
+How to decide that Daily has “not presented” a POI and therefore 4H should be used.
+What specific entry confirmations should trigger once price reaches a marked POI in the new week.
+Whether the first version should only mark POIs and targets, or also generate trade signals.
+My recommendation is to build this in phases:
+Phase 1: weekly candle classification + weekly target projection.
+Phase 2: POI detection inside that weekly candle, using Daily first and 4H as fallback.
+
+Phase 3: entry confirmation logic after price trades into the POI.
+Phase 4: alerts, visuals, and trade management.
+So the answer is: yes, I do think this can be turned into an indicator, and your latest clarification makes the architecture much more solid.
+The next best step is for me to help you convert this into a strict rule spec for coding. I can draft that for you as:
+Indicator Logic Specification, or
+a first Pine Script implementation skeleton.
+If you want, I can do the rule spec first so we lock the trading logic before writing code.

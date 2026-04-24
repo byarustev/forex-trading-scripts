@@ -1,0 +1,464 @@
+//@version=5
+indicator("Weekly HTF Target + POI (v1.1)", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, dynamic_requests=true)
+
+wickDominance = input.float(1.20, "Respect Wick Dominance", minval=1.0, step=0.05)
+show4hFallback = input.bool(true, "Use 4H POI fallback if Daily has none")
+targetLineBars = input.int(250, "Projection Length (bars)", minval=50, maxval=1000)
+showWeeklyCandleLabels = input.bool(true, "Show last weekly candle labels")
+shortLineDays = input.float(2.0, "Short Level Length (days)", minval=0.25, maxval=7.0, step=0.25)
+poiProjectionDays = input.float(7.0, "POI Projection Length (days)", minval=1.0, maxval=30.0, step=0.5)
+displacementBodyMult = input.float(1.30, "Strong Displacement Body Multiplier", minval=1.0, step=0.05)
+enableWeeklyCloseAlert = input.bool(true, "Enable Weekly Close Alert")
+showWeekClassificationDots = input.bool(false, "Show BD/BR week classification dots")
+
+// Weekly order blocks (LuxAlgo-style on weekly timeframe: volume pivot + structure; see order-block-detector.pine)
+showWeeklyLuxOb = input.bool(true, "Show weekly OB zones (LuxAlgo-style)")
+wobVolumePivotLen = input.int(5, "Weekly OB Volume Pivot Length", minval=1, maxval=20)
+wobBullExtLast = input.int(5, "Bullish OBs to keep", minval=1, maxval=100)
+wobBearExtLast = input.int(5, "Bearish OBs to keep", minval=1, maxval=100)
+wobMitigationWick = input.bool(false, "Weekly OB mitigation: use wick (else close)")
+wobBorderBull = input.color(#169400, "WOB Bull border")
+wobBorderBear = input.color(#ff1100, "WOB Bear border")
+
+// Weekly fair value gaps (smart-money-concepts.pine logic on timeframe "W")
+showWeeklyFvg = input.bool(true, "Show weekly FVG zones")
+wfvgUseAutoThreshold = input.bool(true, "Weekly FVG auto threshold")
+wfvgBullExtLast = input.int(5, "Bullish FVGs to keep", minval=1, maxval=100)
+wfvgBearExtLast = input.int(5, "Bearish FVGs to keep", minval=1, maxval=100)
+wfvgBorderBull = input.color(#169400, "WFVG Bull border")
+wfvgBorderBear = input.color(#ff1100, "WFVG Bear border")
+wfvgBorderTransparency = input.int(70, "WFVG border transparency", minval=0, maxval=100)
+
+// Last closed weekly candle (mother candle).
+[wOpen, wHigh, wLow, wClose, wPrevStart, wCurrStart] = request.security(syminfo.tickerid, "W", [open[1], high[1], low[1], close[1], time[1], time], lookahead=barmerge.lookahead_on)
+shortLineMs = int(shortLineDays * 24.0 * 60.0 * 60.0 * 1000.0)
+poiProjectionMs = int(poiProjectionDays * 24.0 * 60.0 * 60.0 * 1000.0)
+levelStartTime = wPrevStart
+levelEndTime = math.min(wCurrStart, wPrevStart + shortLineMs)
+poiStartTime = wCurrStart
+poiEndTime = wCurrStart + poiProjectionMs
+
+body = math.abs(wClose - wOpen)
+upperWick = wHigh - math.max(wOpen, wClose)
+lowerWick = math.min(wOpen, wClose) - wLow
+totalWicks = upperWick + lowerWick
+
+isDisrespect = body > totalWicks
+isBullDisrespect = isDisrespect and wClose > wOpen
+isBearDisrespect = isDisrespect and wClose < wOpen
+
+isBullRespect = lowerWick > body and lowerWick > (upperWick * wickDominance)
+isBearRespect = upperWick > body and upperWick > (lowerWick * wickDominance)
+
+hasStrongDirectionalBody = body >= totalWicks
+isBullDirectionalFallback = not isBullDisrespect and not isBearDisrespect and not isBullRespect and not isBearRespect and hasStrongDirectionalBody and wClose > wOpen
+isBearDirectionalFallback = not isBullDisrespect and not isBearDisrespect and not isBullRespect and not isBearRespect and hasStrongDirectionalBody and wClose < wOpen
+
+targetIsBullish = isBullDisrespect or isBullRespect or isBullDirectionalFallback
+targetIsBearish = isBearDisrespect or isBearRespect or isBearDirectionalFallback
+targetPrice = targetIsBullish ? wHigh : targetIsBearish ? wLow : na
+targetText = targetIsBullish ? "PCH" : targetIsBearish ? "PCL" : "N/A"
+candleColorText = wClose > wOpen ? "Bullish" : wClose < wOpen ? "Bearish" : "Doji"
+candleTypeText = isBullDisrespect ? "Bullish Disrespect (" + candleColorText + ")" : isBearDisrespect ? "Bearish Disrespect (" + candleColorText + ")" : isBullRespect ? "Bullish Respect (" + candleColorText + ")" : isBearRespect ? "Bearish Respect (" + candleColorText + ")" : isBullDirectionalFallback ? "Bullish Directional Body (" + candleColorText + ")" : isBearDirectionalFallback ? "Bearish Directional Body (" + candleColorText + ")" : "Neutral (" + candleColorText + ")"
+weekNarrationFullText = "Last Week: " + candleTypeText
+
+// Daily POI scan inside the mother weekly candle.
+// 1) FVG, 2) Breaker, 3) Order Block.
+dBullFvgTopRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and low > high[2] and low <= wHigh and high[2] >= wLow) ? low : na)
+dBullFvgBottomRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and low > high[2] and low <= wHigh and high[2] >= wLow) ? high[2] : na)
+dBearFvgTopRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and high < low[2] and low[2] <= wHigh and high >= wLow) ? low[2] : na)
+dBearFvgBottomRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and high < low[2] and low[2] <= wHigh and high >= wLow) ? high : na)
+
+dBullBreakerTopRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and low[1] < low[2] and close > high[1] and math.max(open[1], close[1]) <= wHigh and math.min(open[1], close[1]) >= wLow) ? math.max(open[1], close[1]) : na)
+dBullBreakerBottomRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and low[1] < low[2] and close > high[1] and math.max(open[1], close[1]) <= wHigh and math.min(open[1], close[1]) >= wLow) ? math.min(open[1], close[1]) : na)
+dBearBreakerTopRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and high[1] > high[2] and close < low[1] and math.max(open[1], close[1]) <= wHigh and math.min(open[1], close[1]) >= wLow) ? math.max(open[1], close[1]) : na)
+dBearBreakerBottomRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and high[1] > high[2] and close < low[1] and math.max(open[1], close[1]) <= wHigh and math.min(open[1], close[1]) >= wLow) ? math.min(open[1], close[1]) : na)
+
+// Order Block variation A: candle before FVG (candle color ignored).
+dBullObFvgTopRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and low > high[2] and high[1] <= wHigh and low[1] >= wLow) ? math.max(open[1], close[1]) : na)
+dBullObFvgBottomRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and low > high[2] and high[1] <= wHigh and low[1] >= wLow) ? math.min(open[1], close[1]) : na)
+dBearObFvgTopRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and high < low[2] and high[1] <= wHigh and low[1] >= wLow) ? math.max(open[1], close[1]) : na)
+dBearObFvgBottomRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and high < low[2] and high[1] <= wHigh and low[1] >= wLow) ? math.min(open[1], close[1]) : na)
+
+// Order Block variation B: candle before strong displacement (candle color ignored).
+dBullObDispTopRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and close > high[1] and close > open and math.abs(close - open) >= ta.sma(math.abs(close - open), 20) * displacementBodyMult and high[1] <= wHigh and low[1] >= wLow) ? math.max(open[1], close[1]) : na)
+dBullObDispBottomRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and close > high[1] and close > open and math.abs(close - open) >= ta.sma(math.abs(close - open), 20) * displacementBodyMult and high[1] <= wHigh and low[1] >= wLow) ? math.min(open[1], close[1]) : na)
+dBearObDispTopRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and close < low[1] and close < open and math.abs(close - open) >= ta.sma(math.abs(close - open), 20) * displacementBodyMult and high[1] <= wHigh and low[1] >= wLow) ? math.max(open[1], close[1]) : na)
+dBearObDispBottomRaw = request.security(syminfo.tickerid, "D", (time >= wPrevStart and time < wCurrStart and close < low[1] and close < open and math.abs(close - open) >= ta.sma(math.abs(close - open), 20) * displacementBodyMult and high[1] <= wHigh and low[1] >= wLow) ? math.min(open[1], close[1]) : na)
+
+dBullFvgTop = ta.valuewhen(not na(dBullFvgTopRaw), dBullFvgTopRaw, 0)
+dBullFvgBottom = ta.valuewhen(not na(dBullFvgBottomRaw), dBullFvgBottomRaw, 0)
+dBearFvgTop = ta.valuewhen(not na(dBearFvgTopRaw), dBearFvgTopRaw, 0)
+dBearFvgBottom = ta.valuewhen(not na(dBearFvgBottomRaw), dBearFvgBottomRaw, 0)
+
+dBullBreakerTop = ta.valuewhen(not na(dBullBreakerTopRaw), dBullBreakerTopRaw, 0)
+dBullBreakerBottom = ta.valuewhen(not na(dBullBreakerBottomRaw), dBullBreakerBottomRaw, 0)
+dBearBreakerTop = ta.valuewhen(not na(dBearBreakerTopRaw), dBearBreakerTopRaw, 0)
+dBearBreakerBottom = ta.valuewhen(not na(dBearBreakerBottomRaw), dBearBreakerBottomRaw, 0)
+
+dBullObFvgTop = ta.valuewhen(not na(dBullObFvgTopRaw), dBullObFvgTopRaw, 0)
+dBullObFvgBottom = ta.valuewhen(not na(dBullObFvgBottomRaw), dBullObFvgBottomRaw, 0)
+dBearObFvgTop = ta.valuewhen(not na(dBearObFvgTopRaw), dBearObFvgTopRaw, 0)
+dBearObFvgBottom = ta.valuewhen(not na(dBearObFvgBottomRaw), dBearObFvgBottomRaw, 0)
+
+dBullObDispTop = ta.valuewhen(not na(dBullObDispTopRaw), dBullObDispTopRaw, 0)
+dBullObDispBottom = ta.valuewhen(not na(dBullObDispBottomRaw), dBullObDispBottomRaw, 0)
+dBearObDispTop = ta.valuewhen(not na(dBearObDispTopRaw), dBearObDispTopRaw, 0)
+dBearObDispBottom = ta.valuewhen(not na(dBearObDispBottomRaw), dBearObDispBottomRaw, 0)
+
+hasBullFvg = not na(dBullFvgTop) and not na(dBullFvgBottom)
+hasBearFvg = not na(dBearFvgTop) and not na(dBearFvgBottom)
+hasBullBreaker = not na(dBullBreakerTop) and not na(dBullBreakerBottom)
+hasBearBreaker = not na(dBearBreakerTop) and not na(dBearBreakerBottom)
+hasBullObFvg = not na(dBullObFvgTop) and not na(dBullObFvgBottom)
+hasBearObFvg = not na(dBearObFvgTop) and not na(dBearObFvgBottom)
+hasBullObDisp = not na(dBullObDispTop) and not na(dBullObDispBottom)
+hasBearObDisp = not na(dBearObDispTop) and not na(dBearObDispBottom)
+
+float dTop = na
+float dBottom = na
+string dType = "None"
+if targetIsBullish
+    if hasBullFvg
+        dTop := dBullFvgTop
+        dBottom := dBullFvgBottom
+        dType := "FVG"
+    else if hasBullBreaker
+        dTop := dBullBreakerTop
+        dBottom := dBullBreakerBottom
+        dType := "Breaker"
+    else if hasBullObFvg
+        dTop := dBullObFvgTop
+        dBottom := dBullObFvgBottom
+        dType := "OB-FVG"
+    else if hasBullObDisp
+        dTop := dBullObDispTop
+        dBottom := dBullObDispBottom
+        dType := "OB-Disp"
+else if targetIsBearish
+    if hasBearFvg
+        dTop := dBearFvgTop
+        dBottom := dBearFvgBottom
+        dType := "FVG"
+    else if hasBearBreaker
+        dTop := dBearBreakerTop
+        dBottom := dBearBreakerBottom
+        dType := "Breaker"
+    else if hasBearObFvg
+        dTop := dBearObFvgTop
+        dBottom := dBearObFvgBottom
+        dType := "OB-FVG"
+    else if hasBearObDisp
+        dTop := dBearObDispTop
+        dBottom := dBearObDispBottom
+        dType := "OB-Disp"
+
+hasDailyPoi = dType != "None"
+
+// 4H fallback POI.
+hBullTopRaw = request.security(syminfo.tickerid, "240", (time >= wPrevStart and time < wCurrStart and low > high[2] and low <= wHigh and high[2] >= wLow) ? low : na)
+hBullBottomRaw = request.security(syminfo.tickerid, "240", (time >= wPrevStart and time < wCurrStart and low > high[2] and low <= wHigh and high[2] >= wLow) ? high[2] : na)
+hBearTopRaw = request.security(syminfo.tickerid, "240", (time >= wPrevStart and time < wCurrStart and high < low[2] and low[2] <= wHigh and high >= wLow) ? low[2] : na)
+hBearBottomRaw = request.security(syminfo.tickerid, "240", (time >= wPrevStart and time < wCurrStart and high < low[2] and low[2] <= wHigh and high >= wLow) ? high : na)
+
+hTopRaw = targetIsBullish ? hBullTopRaw : targetIsBearish ? hBearTopRaw : na
+hBottomRaw = targetIsBullish ? hBullBottomRaw : targetIsBearish ? hBearBottomRaw : na
+hTop = ta.valuewhen(not na(hTopRaw), hTopRaw, 0)
+hBottom = ta.valuewhen(not na(hBottomRaw), hBottomRaw, 0)
+has4hPoi = not na(hTop) and not na(hBottom)
+
+useDaily = hasDailyPoi
+use4h = not useDaily and show4hFallback and has4hPoi
+
+poiTop = useDaily ? dTop : use4h ? hTop : na
+poiBottom = useDaily ? dBottom : use4h ? hBottom : na
+poiTfText = useDaily ? "D" : use4h ? "4H" : "None"
+poiTypeText = useDaily ? dType : use4h ? "FVG" : "None"
+poiLabelTime = poiStartTime
+
+isNewWeek = ta.change(time("W"))
+weeklyCloseTime = time_close("W")
+isWeeklyCloseBar = not na(weeklyCloseTime) and time_close == weeklyCloseTime
+setupColor = targetIsBullish ? color.lime : targetIsBearish ? color.red : color.gray
+poiColor = targetIsBullish ? color.teal : targetIsBearish ? color.orange : color.gray
+targetLabelColor = color.green
+weekNarrationColor = color.purple
+labelBorderTransparency = 85
+targetAtPrevHigh = not na(targetPrice) and math.abs(targetPrice - wHigh) <= syminfo.mintick
+targetAtPrevLow = not na(targetPrice) and math.abs(targetPrice - wLow) <= syminfo.mintick
+biasDirectionText = targetIsBullish ? "Bullish" : targetIsBearish ? "Bearish" : "Neutral"
+targetPriceText = not na(targetPrice) ? str.tostring(targetPrice, format.mintick) : "N/A"
+// Short symbol for alerts, e.g. FOREXCOM:XAUUSD -> XAUUSD
+tickerIdParts = str.split(syminfo.tickerid, ":")
+alertAssetKey = array.size(tickerIdParts) > 1 ? array.get(tickerIdParts, array.size(tickerIdParts) - 1) : syminfo.ticker
+
+// --- Weekly LuxAlgo-style OB (order-block-detector.pine logic on timeframe "W") ---
+// Mirrors reference model:
+// 1) phv = ta.pivothigh(volume, L, L)
+// 2) os = high[L] > ta.highest(L) ? 0 : low[L] < ta.lowest(L) ? 1 : os[1]
+// 3) bull OB when phv and os==1 -> zone hl2[L]..low[L]
+// 4) bear OB when phv and os==0 -> zone high[L]..hl2[L]
+L_ob = wobVolumePivotLen
+f_weekly_ob_pack(_len, _useWickMitigation) =>
+    upper = ta.highest(_len)
+    lower = ta.lowest(_len)
+    var int os = 0
+    os := high[_len] > upper ? 0 : low[_len] < lower ? 1 : os[1]
+    phv = ta.pivothigh(volume, _len, _len)
+    bull = not na(phv) and os == 1
+    bear = not na(phv) and os == 0
+    bullMitTarget = _useWickMitigation ? ta.lowest(low, _len) : ta.lowest(close, _len)
+    bearMitTarget = _useWickMitigation ? ta.highest(high, _len) : ta.highest(close, _len)
+    [bull, bear, time[_len], hl2[_len], low[_len], high[_len], hl2[_len], bullMitTarget, bearMitTarget]
+
+[wBullCond, wBearCond, wLeftTime, wBullTop, wBullBottom, wBearTop, wBearBottom, wBullMitTarget, wBearMitTarget] = request.security(syminfo.tickerid, "W", f_weekly_ob_pack(L_ob, wobMitigationWick), barmerge.gaps_off, barmerge.lookahead_off)
+isNewWkBullOb = wBullCond and not nz(wBullCond[1], false)
+isNewWkBearOb = wBearCond and not nz(wBearCond[1], false)
+
+// Weekly FVG detection from smart-money-concepts reference.
+[wLastClose, wLastOpen, wLastTime, wCurrentHigh, wCurrentLow, wCurrentTime, wLast2High, wLast2Low] = request.security(syminfo.tickerid, "W", [close[1], open[1], time[1], high[0], low[0], time[0], high[2], low[2]], lookahead=barmerge.lookahead_on)
+wFvgBarDeltaPercent = (wLastClose - wLastOpen) / (wLastOpen * 100)
+wFvgNewTimeframe = timeframe.change("W")
+wFvgThreshold = wfvgUseAutoThreshold ? ta.cum(math.abs(wFvgNewTimeframe ? wFvgBarDeltaPercent : 0)) / math.max(bar_index, 1) * 2 : 0.0
+isNewWkBullFvg = wCurrentLow > wLast2High and wLastClose > wLast2High and wFvgBarDeltaPercent > wFvgThreshold and wFvgNewTimeframe
+isNewWkBearFvg = wCurrentHigh < wLast2Low and wLastClose < wLast2Low and -wFvgBarDeltaPercent > wFvgThreshold and wFvgNewTimeframe
+
+var line targetLine = na
+var label targetLabel = na
+var line prevHighLine = na
+var line prevLowLine = na
+var label prevHighLabel = na
+var label prevLowLabel = na
+var box poiBox = na
+var label poiLabel = na
+var label weekTypeLabel = na
+var array<box> wkObBoxes = array.new_box()
+var array<bool> wkObIsBull = array.new_bool()
+var array<box> wkObKeep = array.new_box()
+var array<bool> wkObIsBullKeep = array.new_bool()
+var array<box> wkFvgBoxes = array.new_box()
+var array<bool> wkFvgIsBull = array.new_bool()
+var array<box> wkFvgKeep = array.new_box()
+var array<bool> wkFvgIsBullKeep = array.new_bool()
+
+f_wk_ob_remove_oldest(_bull) =>
+    sz = array.size(wkObBoxes)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(wkObIsBull, i) == _bull
+                oldBx = array.get(wkObBoxes, i)
+                box.delete(oldBx)
+                array.remove(wkObBoxes, i)
+                array.remove(wkObIsBull, i)
+                break
+
+f_wk_ob_trim() =>
+    bullCount = 0
+    bearCount = 0
+    sz = array.size(wkObBoxes)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(wkObIsBull, i)
+                bullCount += 1
+            else
+                bearCount += 1
+
+    bullExcess = bullCount - wobBullExtLast
+    if bullExcess > 0
+        for i = 0 to bullExcess - 1
+            f_wk_ob_remove_oldest(true)
+
+    bearExcess = bearCount - wobBearExtLast
+    if bearExcess > 0
+        for i = 0 to bearExcess - 1
+            f_wk_ob_remove_oldest(false)
+
+f_wk_fvg_remove_oldest(_bull) =>
+    sz = array.size(wkFvgBoxes)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(wkFvgIsBull, i) == _bull
+                oldBx = array.get(wkFvgBoxes, i)
+                box.delete(oldBx)
+                array.remove(wkFvgBoxes, i)
+                array.remove(wkFvgIsBull, i)
+                break
+
+f_wk_fvg_trim() =>
+    bullCount = 0
+    bearCount = 0
+    sz = array.size(wkFvgBoxes)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(wkFvgIsBull, i)
+                bullCount += 1
+            else
+                bearCount += 1
+
+    bullExcess = bullCount - wfvgBullExtLast
+    if bullExcess > 0
+        for i = 0 to bullExcess - 1
+            f_wk_fvg_remove_oldest(true)
+
+    bearExcess = bearCount - wfvgBearExtLast
+    if bearExcess > 0
+        for i = 0 to bearExcess - 1
+            f_wk_fvg_remove_oldest(false)
+
+if isNewWeek or barstate.isfirst
+    if not na(targetLine)
+        line.delete(targetLine)
+    if not na(targetLabel)
+        label.delete(targetLabel)
+    if not na(prevHighLine)
+        line.delete(prevHighLine)
+    if not na(prevLowLine)
+        line.delete(prevLowLine)
+    if not na(prevHighLabel)
+        label.delete(prevHighLabel)
+    if not na(prevLowLabel)
+        label.delete(prevLowLabel)
+    if not na(poiBox)
+        box.delete(poiBox)
+    if not na(poiLabel)
+        label.delete(poiLabel)
+    if not na(weekTypeLabel)
+        label.delete(weekTypeLabel)
+
+    if showWeeklyCandleLabels
+        weekMidTime = wPrevStart + 302400000
+        weekRange = math.max(wHigh - wLow, syminfo.mintick)
+        typeY = wHigh + (weekRange * 0.08)
+        weekTypeLabel := label.new(weekMidTime, typeY, weekNarrationFullText, xloc=xloc.bar_time, style=label.style_label_down, textcolor=weekNarrationColor, color=color.new(weekNarrationColor, labelBorderTransparency), size=size.tiny)
+
+    prevHighLine := line.new(levelStartTime, wHigh, levelEndTime, wHigh, xloc=xloc.bar_time, extend=extend.none, color=color.new(color.silver, 0), width=1, style=line.style_solid)
+    prevLowLine := line.new(levelStartTime, wLow, levelEndTime, wLow, xloc=xloc.bar_time, extend=extend.none, color=color.new(color.silver, 0), width=1, style=line.style_solid)
+    if not targetAtPrevHigh
+        prevHighLabel := label.new(levelEndTime, wHigh, "PWH", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.silver, color=color.new(color.silver, labelBorderTransparency), size=size.tiny)
+    if not targetAtPrevLow
+        prevLowLabel := label.new(levelEndTime, wLow, "PWL", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.silver, color=color.new(color.silver, labelBorderTransparency), size=size.tiny)
+
+    if not na(targetPrice)
+        targetLine := line.new(levelStartTime, targetPrice, levelEndTime, targetPrice, xloc=xloc.bar_time, extend=extend.none, color=color.new(setupColor, 0), width=1, style=line.style_solid)
+        targetLabel := label.new(levelEndTime, targetPrice, "Target", xloc=xloc.bar_time, style=label.style_label_left, textcolor=targetLabelColor, color=color.new(targetLabelColor, labelBorderTransparency), size=size.tiny)
+
+    if not na(poiTop) and not na(poiBottom)
+        poiBox := box.new(poiStartTime, poiTop, poiEndTime, poiBottom, xloc=xloc.bar_time, border_color=color.new(poiColor, 0), border_width=1, bgcolor=color.new(poiColor, 92))
+        directionText = targetIsBullish ? "Bullish" : "Bearish"
+        poiLabel := label.new(poiLabelTime, poiTop, poiTfText + " " + directionText + " " + poiTypeText + " POI", xloc=xloc.bar_time, style=label.style_label_left, textcolor=poiColor, color=color.new(poiColor, labelBorderTransparency), size=size.tiny)
+
+// Keep weekly narration text in sync on the rightmost bar (fixes stale/missing suffix when label was created before weekly data settled).
+if showWeeklyCandleLabels and barstate.islast and not na(wPrevStart)
+    if not na(weekTypeLabel)
+        label.set_text(weekTypeLabel, weekNarrationFullText)
+    else
+        weekMidTimeLate = wPrevStart + 302400000
+        weekRangeLate = math.max(wHigh - wLow, syminfo.mintick)
+        typeYLate = wHigh + (weekRangeLate * 0.08)
+        weekTypeLabel := label.new(weekMidTimeLate, typeYLate, weekNarrationFullText, xloc=xloc.bar_time, style=label.style_label_down, textcolor=weekNarrationColor, color=color.new(weekNarrationColor, labelBorderTransparency), size=size.tiny)
+
+// Weekly OB zones: new formation on pivot confirmation (historical + live).
+if showWeeklyLuxOb and barstate.isconfirmed
+    if isNewWkBullOb
+        tLeft = wLeftTime
+        zTop = wBullTop
+        zBtm = wBullBottom
+        if not na(tLeft) and not na(zTop) and not na(zBtm) and zTop > zBtm
+            nb = box.new(tLeft, zTop, tLeft + 1, zBtm, xloc=xloc.bar_time, extend=extend.right, bgcolor=color(na), border_color=wobBorderBull, border_width=1)
+            array.push(wkObBoxes, nb)
+            array.push(wkObIsBull, true)
+            f_wk_ob_trim()
+    else if isNewWkBearOb
+        tLeft = wLeftTime
+        zTop = wBearTop
+        zBtm = wBearBottom
+        if not na(tLeft) and not na(zTop) and not na(zBtm) and zTop > zBtm
+            nb = box.new(tLeft, zTop, tLeft + 1, zBtm, xloc=xloc.bar_time, extend=extend.right, bgcolor=color(na), border_color=wobBorderBear, border_width=1)
+            array.push(wkObBoxes, nb)
+            array.push(wkObIsBull, false)
+            f_wk_ob_trim()
+
+// Weekly FVG zones: new formation (historical + live).
+if showWeeklyFvg and barstate.isconfirmed
+    if isNewWkBullFvg
+        tLeft = wLastTime
+        zTop = wCurrentLow
+        zBtm = wLast2High
+        if not na(tLeft) and not na(zTop) and not na(zBtm) and zTop > zBtm
+            nb = box.new(tLeft, zTop, tLeft + 1, zBtm, xloc=xloc.bar_time, extend=extend.right, bgcolor=color(na), border_color=color.new(wfvgBorderBull, wfvgBorderTransparency), border_style=line.style_dashed, border_width=1)
+            array.push(wkFvgBoxes, nb)
+            array.push(wkFvgIsBull, true)
+            f_wk_fvg_trim()
+    else if isNewWkBearFvg
+        tLeft = wLastTime
+        zTop = wLast2Low
+        zBtm = wCurrentHigh
+        if not na(tLeft) and not na(zTop) and not na(zBtm) and zTop > zBtm
+            nb = box.new(tLeft, zTop, tLeft + 1, zBtm, xloc=xloc.bar_time, extend=extend.right, bgcolor=color(na), border_color=color.new(wfvgBorderBear, wfvgBorderTransparency), border_style=line.style_dashed, border_width=1)
+            array.push(wkFvgBoxes, nb)
+            array.push(wkFvgIsBull, false)
+            f_wk_fvg_trim()
+
+// Mitigate weekly OBs (LuxAlgo-style): keep only non-mitigated zones.
+// Must run on every bar to match reference behavior.
+if showWeeklyLuxOb
+    bullMitPx = wBullMitTarget
+    bearMitPx = wBearMitTarget
+    array.clear(wkObKeep)
+    array.clear(wkObIsBullKeep)
+    szWob = array.size(wkObBoxes)
+    if szWob > 0
+        for i = 0 to szWob - 1
+            bx = array.get(wkObBoxes, i)
+            bBull = array.get(wkObIsBull, i)
+            bTop = box.get_top(bx)
+            bBot = box.get_bottom(bx)
+            // Bullish OB mitigates when price trades below the OB bottom.
+            // Bearish OB mitigates when price trades above the OB top.
+            mitigated = bBull ? bullMitPx < bBot : bearMitPx > bTop
+            if mitigated
+                box.delete(bx)
+            else
+                array.push(wkObKeep, bx)
+                array.push(wkObIsBullKeep, bBull)
+    array.clear(wkObBoxes)
+    array.clear(wkObIsBull)
+    szKeep = array.size(wkObKeep)
+    if szKeep > 0
+        for i = 0 to szKeep - 1
+            array.push(wkObBoxes, array.get(wkObKeep, i))
+            array.push(wkObIsBull, array.get(wkObIsBullKeep, i))
+
+// Mitigate weekly FVGs (smart-money-concepts reference): remove bullish on low < bottom, bearish on high > top.
+if showWeeklyFvg
+    array.clear(wkFvgKeep)
+    array.clear(wkFvgIsBullKeep)
+    szWfvg = array.size(wkFvgBoxes)
+    if szWfvg > 0
+        for i = 0 to szWfvg - 1
+            bx = array.get(wkFvgBoxes, i)
+            bBull = array.get(wkFvgIsBull, i)
+            bTop = box.get_top(bx)
+            bBot = box.get_bottom(bx)
+            mitigated = bBull ? low < bBot : high > bTop
+            if mitigated
+                box.delete(bx)
+            else
+                array.push(wkFvgKeep, bx)
+                array.push(wkFvgIsBullKeep, bBull)
+    array.clear(wkFvgBoxes)
+    array.clear(wkFvgIsBull)
+    szKeepFvg = array.size(wkFvgKeep)
+    if szKeepFvg > 0
+        for i = 0 to szKeepFvg - 1
+            array.push(wkFvgBoxes, array.get(wkFvgKeep, i))
+            array.push(wkFvgIsBull, array.get(wkFvgIsBullKeep, i))
+
+plotshape(showWeekClassificationDots and isNewWeek and isBullDisrespect, title="Bullish Disrespect", style=shape.circle, size=size.tiny, location=location.top, color=color.new(color.lime, 0), text="BD")
+plotshape(showWeekClassificationDots and isNewWeek and isBearDisrespect, title="Bearish Disrespect", style=shape.circle, size=size.tiny, location=location.top, color=color.new(color.red, 0), text="BD")
+plotshape(showWeekClassificationDots and isNewWeek and isBullRespect, title="Bullish Respect", style=shape.circle, size=size.tiny, location=location.top, color=color.new(color.teal, 0), text="BR")
+plotshape(showWeekClassificationDots and isNewWeek and isBearRespect, title="Bearish Respect", style=shape.circle, size=size.tiny, location=location.top, color=color.new(color.orange, 0), text="BR")
+
+if enableWeeklyCloseAlert and isWeeklyCloseBar and barstate.isconfirmed
+    alert("ASSET: " + alertAssetKey + "\nW: " + candleTypeText + "\nBIAS: " + biasDirectionText + " | Target: " + targetPriceText, alert.freq_once_per_bar_close)
+
